@@ -4,10 +4,15 @@ import path from 'node:path';
 const target = path.resolve('node_modules/@xbibzlibrary/whatsbibz/lib/Utils/sound-sticker.js');
 
 const CLEAN_LOOP = `    let sticker;
-    for (const [fps, quality] of [[24, 70], [24, 55], [20, 48], [15, 42], [12, 35], [10, 28], [8, 22], [6, 15], [5, 10]]) {
+    const presets = selectedDuration <= 5
+      ? [[24, 70], [24, 55], [15, 45], [10, 35], [6, 15]]
+      : selectedDuration <= 9
+        ? [[15, 45], [12, 35], [8, 22], [6, 15], [5, 10]]
+        : [[10, 30], [8, 22], [6, 15], [5, 10]];
+    for (const [fps, quality] of presets) {
       const filter = \`fps=\${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000\`;
       await run(ffmpeg, [...common, '-map', '0:v:0', '-an', '-vf', filter, '-c:v', 'libwebp_anim', '-q:v', String(quality),
-        '-loop', '0', '-compression_level', '5', '-y', webpPath], timeoutMs);
+        '-loop', '0', '-compression_level', '4', '-y', webpPath], timeoutMs);
       const size = (await stat(webpPath)).size;
       if (size <= SOUND_STICKER_MAX_WEBP_BYTES) {
         sticker = await readFile(webpPath);
@@ -64,9 +69,9 @@ try {
     changed = true;
   }
 
-  // 6. Filter WebP bersih tanpa hqdn3d/unsharp (bebas glitch warna) dengan tangga FPS rapat (<= 500 KiB)
-  const loopRegex = /    let sticker;\r?\n    for \(const \[[^\]]+\] of \[[\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
-  if (loopRegex.test(src) && !src.includes('[[24, 70], [24, 55], [20, 48], [15, 42], [12, 35], [10, 28], [8, 22], [6, 15], [5, 10]]')) {
+  // 6. Filter WebP bersih + preset adaptif durasi & compression_level 4 (3-5x lebih cepat, bebas timeout di VPS)
+  const loopRegex = /    let sticker;\r?\n(?:    const presets[\s\S]*?)?    for \(const \[[^\]]+\] of [\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
+  if (loopRegex.test(src) && !src.includes('selectedDuration <= 5')) {
     src = src.replace(loopRegex, CLEAN_LOOP);
     changed = true;
   }

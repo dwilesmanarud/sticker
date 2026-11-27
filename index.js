@@ -209,15 +209,43 @@ function pickPinterestVideoFromList(videoList) {
   const entries = Object.values(videoList).filter((v) => v && typeof v.url === 'string');
   const mp4 =
     videoList.V_720P?.url ||
+    videoList.v720P?.url ||
     videoList.V_480P?.url ||
+    videoList.v480P?.url ||
     videoList.V_EXP7?.url ||
     entries.find((v) => /\.mp4(\?|$)/i.test(v.url))?.url ||
     null;
   const m3u8 =
     videoList.V_HLSV4?.url ||
+    videoList.vHLSV4?.url ||
     videoList.V_HLSV3_WEB?.url ||
+    videoList.vHLSV3MOBILE?.url ||
     entries.find((v) => /\.m3u8(\?|$)/i.test(v.url))?.url ||
     null;
+  return { mp4, m3u8 };
+}
+
+function extractPinterestVideoFromNode(node) {
+  let mp4 = null;
+  let m3u8 = null;
+  if (!node || typeof node !== 'object') return { mp4, m3u8 };
+  const candidates = [
+    node.videoList720P,
+    node.videoList,
+    node.video_list,
+    node.videoListMobile,
+    node.v_hlsv4_video_list,
+    node.videoListEXP7,
+    node.videoListEXP6,
+    node.videoListEXP5,
+    node.videoListEXP4,
+    node.videoListEXP3,
+  ];
+  for (const list of candidates) {
+    const picked = pickPinterestVideoFromList(list);
+    if (picked.mp4 && !mp4) mp4 = picked.mp4;
+    if (picked.m3u8 && !m3u8) m3u8 = picked.m3u8;
+  }
   return { mp4, m3u8 };
 }
 
@@ -232,6 +260,8 @@ async function downloadHlsToMp4Buffer(m3u8Url, maxSeconds = 20) {
           '-y',
           '-loglevel',
           'error',
+          '-allowed_extensions',
+          'ALL',
           '-i',
           m3u8Url,
           '-t',
@@ -345,20 +375,20 @@ async function downloadPinterestMedia(rawUrl) {
           .slice(0, 45);
       }
 
-      const vList = pin.videos?.videoList || pin.videos?.video_list;
-      if (vList) {
-        const directVid = pickPinterestVideoFromList(vList);
-        if (directVid.mp4 && !mp4Url) mp4Url = directVid.mp4;
-        if (directVid.m3u8 && !m3u8Url) m3u8Url = directVid.m3u8;
-      }
+      const directVid = extractPinterestVideoFromNode(pin.videos);
+      if (directVid.mp4 && !mp4Url) mp4Url = directVid.mp4;
+      if (directVid.m3u8 && !m3u8Url) m3u8Url = directVid.m3u8;
 
       const storyPages = pin.storyPinData?.pages || pin.story_pin_data?.pages;
-      if (!mp4Url && !m3u8Url && Array.isArray(storyPages)) {
+      if (!mp4Url && Array.isArray(storyPages)) {
         for (const page of storyPages) {
           for (const block of page?.blocks || []) {
-            const sv = pickPinterestVideoFromList(block?.video?.videoList || block?.video?.video_list);
-            if (sv.mp4 && !mp4Url) mp4Url = sv.mp4;
-            if (sv.m3u8 && !m3u8Url) m3u8Url = sv.m3u8;
+            const sv1 = extractPinterestVideoFromNode(block?.videoDataV2);
+            const sv2 = extractPinterestVideoFromNode(block?.video);
+            if (sv1.mp4 && !mp4Url) mp4Url = sv1.mp4;
+            if (sv2.mp4 && !mp4Url) mp4Url = sv2.mp4;
+            if (sv1.m3u8 && !m3u8Url) m3u8Url = sv1.m3u8;
+            if (sv2.m3u8 && !m3u8Url) m3u8Url = sv2.m3u8;
           }
         }
       }
