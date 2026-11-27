@@ -249,44 +249,143 @@ function extractPinterestVideoFromNode(node) {
   return { mp4, m3u8 };
 }
 
+async function tryFetchDirectMp4FromHls(m3u8Url) {
+  const candidates = [
+    m3u8Url.replace('/hls/', '/expMp4/').replace(/\.m3u8(\?.*)?$/i, '_720w.mp4'),
+    m3u8Url.replace('/hls/', '/720p/').replace(/\.m3u8(\?.*)?$/i, '.mp4'),
+  ].filter((u) => u !== m3u8Url && /\.mp4$/i.test(u));
+
+  for (const url of [...new Set(candidates)]) {
+    try {
+      const res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(25_000),
+      });
+      if (!res.ok) continue;
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > 1024 && buf.length <= 20 * 1024 * 1024) {
+        return buf;
+      }
+    } catch {
+      // Coba kandidat berikutnya
+    }
+  }
+  return null;
+}
+
+/**
+ * Mengunduh stream HLS (.m3u8) Pinterest memakai Node fetch() ke file lokal terlebih dahulu
+ * (agar tidak bergantung pada dukungan TLS/HTTPS di binary ffmpeg-static Linux), lalu remux ke MP4.
+ */
 async function downloadHlsToMp4Buffer(m3u8Url, maxSeconds = 20) {
+  // 1. Coba langsung unduh versi MP4 720p jika tersedia di CDN Pinterest
+  const directMp4 = await tryFetchDirectMp4FromHls(m3u8Url);
+  if (directMp4) return directMp4;
+
+  // 2. Unduh playlist .m3u8 + segmen secara lokal dengan Node fetch()
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-pin-hls-'));
   const outMp4 = path.join(dir, 'pin.mp4');
+  const fetchText = async (u) => {
+    const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(20_000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.text();
+  };
+
   try {
-    await new Promise((resolve, reject) => {
-      execFile(
-        ffmpegPath,
-        [
-          '-y',
-          '-loglevel',
-          'error',
-          '-allowed_extensions',
-          'ALL',
-          '-i',
-          m3u8Url,
-          '-t',
-          String(maxSeconds),
-          '-c:v',
-          'libx264',
-          '-preset',
-          'veryfast',
-          '-pix_fmt',
-          'yuv420p',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '128k',
-          '-movflags',
-          '+faststart',
-          outMp4,
-        ],
-        { windowsHide: true, timeout: 60_000 },
-        (err, _stdout, stderr) => {
-          if (err) reject(new Error(`Gagal mengunduh stream video Pinterest: ${stderr?.slice(-200) || err.message}`));
-          else resolve();
+    let playlistUrl = m3u8Url;
+    let playlistText = await fetchText(playlistUrl);
+
+    // Jika master playlist (#EXT-X-STREAM-INF), pilih variant video (dan audio jika terpisah)
+    let audioPlaylistUrl = null;
+    if (playlistText.includes('#EXT-X-STREAM-INF')) {
+      const lines = playlistText.split(/\r?\n/);
+      const audioMatch = playlistText.match(/#EXT-X-MEDIA:[^\n]*TYPE=AUDIO[^\n]*URI="([^"]+)"/i);
+      if (audioMatch) {
+        audioPlaylistUrl = new URL(audioMatch[1], playlistUrl).toString();
+      }
+      const variants = lines
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#'));
+      if (!variants.length) throw new Error('Variant HLS Pinterest tidak ditemukan.');
+      playlistUrl = new URL(variants[variants.length - 1], playlistUrl).toString();
+      playlistText = await fetchText(playlistUrl);
+    }
+
+    const downloadLocalPlaylist = async (plUrl, plText, prefix) => {
+      const lines = plText.split(/\r?\n/);
+      const outLines = [];
+      let segIdx = 0;
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        // Handle EXT-X-MAP:URI="..." untuk fMP4/cmfv
+        if (line.startsWith('#EXT-X-MAP:')) {
+          const uriMatch = line.match(/URI="([^"]+)"/i);
+          if (uriMatch) {
+            const abs = new URL(uriMatch[1], plUrl).toString();
+            const ext = path.extname(new URL(abs).pathname) || '.mp4';
+            const localName = `${prefix}_init${ext}`;
+            const segRes = await fetch(abs, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(20_000) });
+            if (segRes.ok) {
+              await fs.writeFile(path.join(dir, localName), Buffer.from(await segRes.arrayBuffer()));
+              outLines.push(line.replace(uriMatch[1], localName));
+              continue;
+            }
+          }
+          outLines.push(line);
+          continue;
         }
-      );
+        if (line.startsWith('#')) {
+          outLines.push(line);
+          continue;
+        }
+        const abs = new URL(line, plUrl).toString();
+        const ext = path.extname(new URL(abs).pathname) || '.ts';
+        const localName = `${prefix}_${segIdx++}${ext}`;
+        const segRes = await fetch(abs, { headers: { 'User-Agent': 'Mozilla/5.0' }, signal: AbortSignal.timeout(20_000) });
+        if (!segRes.ok) throw new Error(`Gagal unduh segmen video Pinterest (HTTP ${segRes.status}).`);
+        await fs.writeFile(path.join(dir, localName), Buffer.from(await segRes.arrayBuffer()));
+        outLines.push(localName);
+      }
+      const localM3u8 = path.join(dir, `${prefix}.m3u8`);
+      await fs.writeFile(localM3u8, outLines.join('\n') + '\n', 'utf8');
+      return localM3u8;
+    };
+
+    const localVideoM3u8 = await downloadLocalPlaylist(playlistUrl, playlistText, 'vid');
+    const args = ['-y', '-loglevel', 'error', '-allowed_extensions', 'ALL', '-i', localVideoM3u8];
+
+    if (audioPlaylistUrl) {
+      const audioText = await fetchText(audioPlaylistUrl);
+      const localAudioM3u8 = await downloadLocalPlaylist(audioPlaylistUrl, audioText, 'aud');
+      args.push('-allowed_extensions', 'ALL', '-i', localAudioM3u8, '-map', '0:v:0', '-map', '1:a:0?');
+    }
+
+    args.push(
+      '-t',
+      String(maxSeconds),
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-pix_fmt',
+      'yuv420p',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '128k',
+      '-movflags',
+      '+faststart',
+      outMp4
+    );
+
+    await new Promise((resolve, reject) => {
+      execFile(ffmpegPath, args, { windowsHide: true, timeout: 60_000 }, (err, _stdout, stderr) => {
+        if (err) reject(new Error(`Gagal memproses stream video Pinterest: ${stderr?.slice(-200) || err.message}`));
+        else resolve();
+      });
     });
+
     const buf = await fs.readFile(outMp4);
     if (!buf.length) throw new Error('Stream video Pinterest kosong.');
     if (buf.length > 20 * 1024 * 1024) throw new Error('Ukuran video Pinterest melebihi 20 MB.');
@@ -476,14 +575,14 @@ async function downloadPinterestMedia(rawUrl) {
     }
   }
 
-  // 4. Fallback regex langsung dari HTML halaman Pinterest (kecualikan aset UI bawaan Pinterest)
+  // 4. Fallback regex langsung dari HTML halaman Pinterest (mendukung slash normal maupun escaped \/)
   if (!mp4Url) {
-    const m = html.match(/https:\/\/v\d*\.pinimg\.com\/[^"'\s\\]+?\.mp4(?:\?[^"'\s\\]*)?/i);
-    if (m) mp4Url = m[0].replace(/\\u002F/g, '/');
+    const m = html.match(/https?:\\?\/\\?\/v\d*\.pinimg\.com[^"'\s]+?\.mp4(?:\?[^"'\s]*)?/i);
+    if (m) mp4Url = m[0].replace(/\\\//g, '/').replace(/\\u002F/gi, '/');
   }
   if (!mp4Url && !m3u8Url) {
-    const m = html.match(/https:\/\/v\d*\.pinimg\.com\/[^"'\s\\]+?\.m3u8(?:\?[^"'\s\\]*)?/i);
-    if (m) m3u8Url = m[0].replace(/\\u002F/g, '/');
+    const m = html.match(/https?:\\?\/\\?\/v\d*\.pinimg\.com[^"'\s]+?\.m3u8(?:\?[^"'\s]*)?/i);
+    if (m) m3u8Url = m[0].replace(/\\\//g, '/').replace(/\\u002F/gi, '/');
   }
   if (!imageUrl) {
     const allOrigs =
