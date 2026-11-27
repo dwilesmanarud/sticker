@@ -680,20 +680,18 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
       return { sticker: webp, isAnimated: false };
     }
 
-    // Video tanpa suara atau GIF animasi -> WebP animasi 512x512 bersih (maks 500 KiB agar aman di WhatsApp)
+    // Video tanpa suara atau GIF animasi -> WebP animasi 512x512 bersih (yuva420p + kualitas tinggi, maks 500 KiB)
     const presets = [
-      [24, 70],
-      [24, 55],
-      [20, 48],
-      [15, 42],
-      [12, 35],
-      [10, 28],
-      [8, 22],
-      [6, 15],
-      [5, 10],
+      [20, 62],
+      [15, 55],
+      [12, 50],
+      [10, 45],
+      [8, 38],
+      [6, 30],
+      [5, 22],
     ];
     for (const [fps, quality] of presets) {
-      const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
+      const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000,format=yuva420p`;
       const args = ['-y', '-loglevel', 'error'];
       if (startSeconds > 0 && !isGif) args.push('-ss', String(startSeconds));
       args.push(
@@ -706,12 +704,14 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
         filter,
         '-c:v',
         'libwebp_anim',
+        '-preset',
+        'default',
         '-q:v',
         String(quality),
         '-loop',
         '0',
         '-compression_level',
-        '5',
+        '4',
         outPath
       );
       await new Promise((resolve, reject) => {

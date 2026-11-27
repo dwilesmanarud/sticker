@@ -5,13 +5,13 @@ const target = path.resolve('node_modules/@xbibzlibrary/whatsbibz/lib/Utils/soun
 
 const CLEAN_LOOP = `    let sticker;
     const presets = selectedDuration <= 5
-      ? [[24, 70], [24, 55], [15, 45], [10, 35], [6, 15]]
+      ? [[24, 72], [20, 62], [15, 55], [12, 48], [10, 40], [8, 30]]
       : selectedDuration <= 9
-        ? [[15, 45], [12, 35], [8, 22], [6, 15], [5, 10]]
-        : [[10, 30], [8, 22], [6, 15], [5, 10]];
+        ? [[15, 60], [12, 52], [10, 45], [8, 38], [6, 28], [5, 20]]
+        : [[12, 55], [10, 48], [8, 42], [6, 35], [5, 25], [5, 18]];
     for (const [fps, quality] of presets) {
-      const filter = \`fps=\${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000\`;
-      await run(ffmpeg, [...common, '-map', '0:v:0', '-an', '-vf', filter, '-c:v', 'libwebp_anim', '-q:v', String(quality),
+      const filter = \`fps=\${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000,format=yuva420p\`;
+      await run(ffmpeg, [...common, '-map', '0:v:0', '-an', '-vf', filter, '-c:v', 'libwebp_anim', '-preset', 'default', '-q:v', String(quality),
         '-loop', '0', '-compression_level', '4', '-y', webpPath], timeoutMs);
       const size = (await stat(webpPath)).size;
       if (size <= SOUND_STICKER_MAX_WEBP_BYTES) {
@@ -69,9 +69,9 @@ try {
     changed = true;
   }
 
-  // 6. Filter WebP bersih + preset adaptif durasi & compression_level 4 (3-5x lebih cepat, bebas timeout di VPS)
+  // 6. Filter WebP bersih (yuva420p + -preset default, kualitas tinggi anti bergaris-garis, cepat <= 500 KiB)
   const loopRegex = /    let sticker;\r?\n(?:    const presets[\s\S]*?)?    for \(const \[[^\]]+\] of [\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
-  if (loopRegex.test(src) && !src.includes('selectedDuration <= 5')) {
+  if (loopRegex.test(src) && !src.includes("format=yuva420p")) {
     src = src.replace(loopRegex, CLEAN_LOOP);
     changed = true;
   }
