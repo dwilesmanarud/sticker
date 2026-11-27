@@ -107,37 +107,107 @@ function extractTikTokUrl(text) {
   return match ? match[0] : null;
 }
 
-/**
- * Mengunduh video TikTok publik tanpa watermark (MP4) via TikWM API.
- * Memvalidasi host tiktok.com dan membatasi ukuran maksimal 20 MB.
- */
-async function downloadTikTokVideo(rawUrl) {
-  let parsed;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw new Error('Format link TikTok tidak valid.');
-  }
+async function resolveTikTokVideoId(rawUrl) {
+  const direct = String(rawUrl || '').match(/\/(?:video|photo)\/(\d{8,25})/i);
+  if (direct) return direct[1];
 
-  if (
-    !['http:', 'https:'].includes(parsed.protocol) ||
-    !/(^|\.)tiktok\.com$/i.test(parsed.hostname)
-  ) {
-    throw new Error('Link harus berasal dari domain tiktok.com (contoh: vt.tiktok.com atau www.tiktok.com).');
-  }
+  const res = await fetch(rawUrl, {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(15_000),
+  });
+  const finalUrl = res.url || '';
+  const m = finalUrl.match(/\/(?:video|photo)\/(\d{8,25})/i);
+  if (m) return m[1];
+  const html = await res.text().catch(() => '');
+  const htmlMatch = html.match(/\/(?:video|photo)\/(\d{8,25})/i);
+  return htmlMatch ? htmlMatch[1] : null;
+}
 
+async function fetchTikTokViaOfficialFeed(videoId) {
+  const endpoints = [
+    `https://api22-normal-c-alisg.tiktokv.com/aweme/v1/feed/?aweme_id=${videoId}&iid=7318518857994389254&device_id=7318517321748022790&channel=googleplay&app_name=musical_ly&version_code=300904&device_platform=android&device_type=ASUS_Z01QD&version=9`,
+    `https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id=${videoId}`,
+  ];
+
+  let lastErr = null;
+  for (const endpoint of endpoints) {
+    try {
+      const apiRes = await fetch(endpoint, {
+        headers: {
+          'User-Agent':
+            'com.zhiliaoapp.musically/2022600030 (Linux; U; Android 7.1.2; es_ES; SM-G988N; Build/NRD90M;tt-ok/3.12.13.1)',
+        },
+        signal: AbortSignal.timeout(15_000),
+      });
+      if (!apiRes.ok) {
+        lastErr = new Error(`HTTP ${apiRes.status}`);
+        continue;
+      }
+      const json = await apiRes.json();
+      const item =
+        json?.aweme_list?.find((a) => String(a?.aweme_id) === String(videoId)) ||
+        json?.aweme_list?.[0];
+      if (!item || String(item?.aweme_id) !== String(videoId)) {
+        lastErr = new Error('Video TikTok tidak ditemukan atau bersifat privat.');
+        continue;
+      }
+      if (item.image_post_info?.images?.length && !item.video?.play_addr?.url_list?.length) {
+        throw new Error('Link TikTok ini berupa slide foto, bukan video.');
+      }
+
+      const urls = [
+        ...(item.video?.play_addr?.url_list || []),
+        ...(item.video?.download_addr?.url_list || []),
+      ].filter(Boolean);
+
+      for (const videoUrl of urls) {
+        try {
+          const mediaRes = await fetch(videoUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(25_000),
+          });
+          if (!mediaRes.ok) continue;
+          const buf = Buffer.from(await mediaRes.arrayBuffer());
+          if (!buf.length) continue;
+          if (buf.length > 20 * 1024 * 1024) {
+            throw new Error('Ukuran video TikTok melebihi batas 20 MB.');
+          }
+          const cleanTitle = String(item.desc || '').replace(/\s+/g, ' ').trim().slice(0, 45);
+          return {
+            buffer: buf,
+            title: cleanTitle || `TikTok ${videoId}`,
+            author: item.author?.unique_id || 'tiktok',
+          };
+        } catch (dlErr) {
+          if (dlErr?.message?.includes('20 MB')) throw dlErr;
+          lastErr = dlErr;
+        }
+      }
+    } catch (err) {
+      if (err?.message?.includes('slide foto') || err?.message?.includes('20 MB')) throw err;
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('Gagal mengambil video dari server TikTok.');
+}
+
+async function fetchTikTokViaTikwm(urlStr) {
   const apiRes = await fetch('https://www.tikwm.com/api/', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
       'User-Agent': 'Mozilla/5.0',
     },
-    body: new URLSearchParams({ url: parsed.toString(), hd: '0' }),
-    signal: AbortSignal.timeout(20_000),
+    body: new URLSearchParams({ url: urlStr, hd: '0' }),
+    signal: AbortSignal.timeout(15_000),
   });
 
   if (!apiRes.ok) {
-    throw new Error(`Layanan downloader TikTok gagal merespons (HTTP ${apiRes.status}).`);
+    throw new Error(`Layanan cadangan TikWM gagal merespons (HTTP ${apiRes.status}).`);
   }
 
   const json = await apiRes.json();
@@ -157,7 +227,7 @@ async function downloadTikTokVideo(rawUrl) {
 
   const mediaRes = await fetch(videoUrl, {
     headers: { 'User-Agent': 'Mozilla/5.0' },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(25_000),
   });
 
   if (!mediaRes.ok) {
@@ -178,6 +248,45 @@ async function downloadTikTokVideo(rawUrl) {
     title: cleanTitle || `TikTok ${data.id || ''}`.trim(),
     author: data.author?.unique_id || 'tiktok',
   };
+}
+
+/**
+ * Mengunduh video TikTok publik tanpa watermark (MP4).
+ * Prioritas 1: API langsung TikTok (tanpa bergantung pihak ketiga), Prioritas 2: cadangan TikWM.
+ */
+async function downloadTikTokVideo(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('Format link TikTok tidak valid.');
+  }
+
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    !/(^|\.)tiktok\.com$/i.test(parsed.hostname)
+  ) {
+    throw new Error('Link harus berasal dari domain tiktok.com (contoh: vt.tiktok.com atau www.tiktok.com).');
+  }
+
+  const urlStr = parsed.toString();
+  let primaryErr = null;
+
+  try {
+    const videoId = await resolveTikTokVideoId(urlStr);
+    if (videoId) {
+      return await fetchTikTokViaOfficialFeed(videoId);
+    }
+  } catch (err) {
+    if (err?.message?.includes('slide foto') || err?.message?.includes('20 MB')) throw err;
+    primaryErr = err;
+  }
+
+  try {
+    return await fetchTikTokViaTikwm(urlStr);
+  } catch (fallbackErr) {
+    throw new Error(primaryErr?.message || fallbackErr?.message || 'Gagal mengunduh video TikTok.');
+  }
 }
 
 function extractPinterestUrl(text = '') {
