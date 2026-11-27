@@ -250,9 +250,89 @@ async function fetchTikTokViaTikwm(urlStr) {
   };
 }
 
+async function fetchTikTokViaTikmate(urlStr) {
+  const apiRes = await fetch('https://api.tikmate.app/api/lookup', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'Mozilla/5.0',
+    },
+    body: new URLSearchParams({ url: urlStr }),
+    signal: AbortSignal.timeout(12_000),
+  });
+  if (!apiRes.ok) throw new Error(`TikMate HTTP ${apiRes.status}`);
+  const json = await apiRes.json();
+  if (!json?.success || !json?.token || !json?.id) {
+    throw new Error(json?.message || 'TikMate tidak menemukan video TikTok.');
+  }
+
+  const mediaRes = await fetch(`https://tikmate.app/download/${json.token}/${json.id}.mp4`, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    signal: AbortSignal.timeout(25_000),
+  });
+  if (!mediaRes.ok) throw new Error(`TikMate download HTTP ${mediaRes.status}`);
+  const buf = Buffer.from(await mediaRes.arrayBuffer());
+  if (!buf.length) throw new Error('File video TikTok kosong.');
+  if (buf.length > 20 * 1024 * 1024) {
+    throw new Error('Ukuran video TikTok melebihi batas 20 MB.');
+  }
+
+  const cleanTitle = String(json.author_name || json.author_id || '').replace(/\s+/g, ' ').trim().slice(0, 45);
+  return {
+    buffer: buf,
+    title: cleanTitle ? `TikTok ${cleanTitle}` : `TikTok ${json.id}`,
+    author: json.author_id || 'tiktok',
+  };
+}
+
+async function fetchTikTokViaSsstik(urlStr) {
+  const pageRes = await fetch('https://ssstik.io/en', {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!pageRes.ok) throw new Error(`SSSTik HTTP ${pageRes.status}`);
+  const pageHtml = await pageRes.text();
+  const tt = pageHtml.match(/s_tt\s*=\s*'([^']+)'/)?.[1];
+  if (!tt) throw new Error('Token SSSTik tidak ditemukan.');
+
+  const dlRes = await fetch('https://ssstik.io/abc?url=dl', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'User-Agent': 'Mozilla/5.0',
+      Origin: 'https://ssstik.io',
+      Referer: 'https://ssstik.io/en',
+    },
+    body: new URLSearchParams({ id: urlStr, locale: 'en', tt }),
+    signal: AbortSignal.timeout(12_000),
+  });
+  if (!dlRes.ok) throw new Error(`SSSTik lookup HTTP ${dlRes.status}`);
+  const outHtml = await dlRes.text();
+  const mp4Url = outHtml.match(/href="(https:\/\/tikcdn\.io[^"]+)"/i)?.[1];
+  if (!mp4Url) throw new Error('Tautan video SSSTik tidak ditemukan.');
+
+  const mediaRes = await fetch(mp4Url, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    signal: AbortSignal.timeout(25_000),
+  });
+  if (!mediaRes.ok) throw new Error(`SSSTik download HTTP ${mediaRes.status}`);
+  const buf = Buffer.from(await mediaRes.arrayBuffer());
+  if (!buf.length) throw new Error('File video TikTok kosong.');
+  if (buf.length > 20 * 1024 * 1024) {
+    throw new Error('Ukuran video TikTok melebihi batas 20 MB.');
+  }
+  const titleMatch = outHtml.match(/class="maintext"[^>]*>([^<]+)</i)?.[1] || '';
+  const cleanTitle = titleMatch.replace(/\s+/g, ' ').trim().slice(0, 45);
+  return {
+    buffer: buf,
+    title: cleanTitle || 'TikTok Video',
+    author: 'tiktok',
+  };
+}
+
 /**
- * Mengunduh video TikTok publik tanpa watermark (MP4).
- * Prioritas 1: API langsung TikTok (tanpa bergantung pihak ketiga), Prioritas 2: cadangan TikWM.
+ * Mengunduh video TikTok publik tanpa watermark (MP4) dengan 4 server cadangan otomatis:
+ * 1. TikMate -> 2. SSSTik -> 3. Official TikTok Feed API -> 4. TikWM
  */
 async function downloadTikTokVideo(rawUrl) {
   let parsed;
@@ -270,23 +350,28 @@ async function downloadTikTokVideo(rawUrl) {
   }
 
   const urlStr = parsed.toString();
-  let primaryErr = null;
+  const providers = [
+    () => fetchTikTokViaTikmate(urlStr),
+    () => fetchTikTokViaSsstik(urlStr),
+    async () => {
+      const videoId = await resolveTikTokVideoId(urlStr);
+      if (!videoId) throw new Error('ID video TikTok tidak ditemukan.');
+      return fetchTikTokViaOfficialFeed(videoId);
+    },
+    () => fetchTikTokViaTikwm(urlStr),
+  ];
 
-  try {
-    const videoId = await resolveTikTokVideoId(urlStr);
-    if (videoId) {
-      return await fetchTikTokViaOfficialFeed(videoId);
+  let lastErr = null;
+  for (const runProvider of providers) {
+    try {
+      return await runProvider();
+    } catch (err) {
+      if (err?.message?.includes('slide foto') || err?.message?.includes('20 MB')) throw err;
+      lastErr = err;
     }
-  } catch (err) {
-    if (err?.message?.includes('slide foto') || err?.message?.includes('20 MB')) throw err;
-    primaryErr = err;
   }
 
-  try {
-    return await fetchTikTokViaTikwm(urlStr);
-  } catch (fallbackErr) {
-    throw new Error(primaryErr?.message || fallbackErr?.message || 'Gagal mengunduh video TikTok.');
-  }
+  throw new Error(lastErr?.message || 'Semua server downloader TikTok sedang sibuk, coba lagi sebentar.');
 }
 
 function extractPinterestUrl(text = '') {
