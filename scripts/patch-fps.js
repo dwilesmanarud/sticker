@@ -3,13 +3,9 @@ import path from 'node:path';
 
 const target = path.resolve('node_modules/@xbibzlibrary/whatsbibz/lib/Utils/sound-sticker.js');
 
-const OPTIMIZED_LOOP = `    let sticker;
-    for (const [fps, quality, scaleSize] of [[24, 70, 512], [24, 55, 512], [20, 48, 512], [15, 42, 384], [12, 35, 384], [10, 28, 320], [8, 22, 320], [6, 16, 256], [5, 12, 256]]) {
-      const denoise = scaleSize >= 512 ? 'hqdn3d=1.2:1.2:5:5' : 'hqdn3d=1.5:1.5:6:6';
-      const scaleChain = scaleSize >= 512
-        ? 'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,unsharp=3:3:0.3:3:3:0.0'
-        : \`scale=\${scaleSize}:\${scaleSize}:force_original_aspect_ratio=decrease:flags=lanczos,scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos\`;
-      const filter = \`fps=\${fps},format=yuv420p,\${denoise},\${scaleChain},format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000\`;
+const CLEAN_LOOP = `    let sticker;
+    for (const [fps, quality] of [[24, 70], [24, 55], [20, 48], [15, 42], [12, 35], [10, 28], [8, 22], [6, 15], [5, 10]]) {
+      const filter = \`fps=\${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000\`;
       await run(ffmpeg, [...common, '-map', '0:v:0', '-an', '-vf', filter, '-c:v', 'libwebp_anim', '-q:v', String(quality),
         '-loop', '0', '-compression_level', '5', '-y', webpPath], timeoutMs);
       const size = (await stat(webpPath)).size;
@@ -68,10 +64,10 @@ try {
     changed = true;
   }
 
-  // 6. Optimasi loop encode WebP: format=yuv420p (anti glitch warna HDR) + denoise ringan (hqdn3d) + unsharp + tangga FPS/resolusi pintar (<= 500 KiB)
+  // 6. Filter WebP bersih tanpa hqdn3d/unsharp (bebas glitch warna) dengan tangga FPS rapat (<= 500 KiB)
   const loopRegex = /    let sticker;\r?\n    for \(const \[[^\]]+\] of \[[\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
-  if (loopRegex.test(src) && !src.includes('format=yuv420p,${denoise}')) {
-    src = src.replace(loopRegex, OPTIMIZED_LOOP);
+  if (loopRegex.test(src) && !src.includes('[[24, 70], [24, 55], [20, 48], [15, 42], [12, 35], [10, 28], [8, 22], [6, 15], [5, 10]]')) {
+    src = src.replace(loopRegex, CLEAN_LOOP);
     changed = true;
   }
 
@@ -86,9 +82,9 @@ try {
 
   if (changed) {
     await fs.writeFile(target, src, 'utf8');
-    console.log('✅ Patched sound-sticker.js (24 FPS, tajam+denoise, yuv420p, maks. 15 detik, WebP 500 KiB, avoid_negative_ts)');
+    console.log('✅ Patched sound-sticker.js (24 FPS, filter bersih anti-glitch, maks. 15 detik, WebP 500 KiB, avoid_negative_ts)');
   } else {
-    console.log('ℹ️ Patch sound-sticker.js (24 FPS, tajam+denoise, yuv420p, maks. 15 detik, WebP 500 KiB) sudah aktif');
+    console.log('ℹ️ Patch sound-sticker.js (24 FPS, filter bersih anti-glitch, maks. 15 detik, WebP 500 KiB) sudah aktif');
   }
 } catch (err) {
   console.warn('⚠️ Lewati patch sound-sticker.js:', err.message);

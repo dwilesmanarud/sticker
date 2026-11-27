@@ -462,23 +462,20 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
       return { sticker: webp, isAnimated: false };
     }
 
-    // Video tanpa suara atau GIF animasi -> WebP animasi 512x512 (maks 500 KiB agar aman di WhatsApp)
+    // Video tanpa suara atau GIF animasi -> WebP animasi 512x512 bersih (maks 500 KiB agar aman di WhatsApp)
     const presets = [
-      [24, 70, 512],
-      [20, 50, 512],
-      [15, 42, 384],
-      [12, 35, 384],
-      [10, 28, 320],
-      [8, 22, 256],
-      [5, 12, 256],
+      [24, 70],
+      [24, 55],
+      [20, 48],
+      [15, 42],
+      [12, 35],
+      [10, 28],
+      [8, 22],
+      [6, 15],
+      [5, 10],
     ];
-    for (const [fps, quality, scaleSize] of presets) {
-      const denoise = scaleSize >= 512 ? 'hqdn3d=1.2:1.2:5:5' : 'hqdn3d=1.5:1.5:6:6';
-      const scaleChain =
-        scaleSize >= 512
-          ? 'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,unsharp=3:3:0.3:3:3:0.0'
-          : `scale=${scaleSize}:${scaleSize}:force_original_aspect_ratio=decrease:flags=lanczos,scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos`;
-      const filter = `fps=${fps},format=yuv420p,${denoise},${scaleChain},format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
+    for (const [fps, quality] of presets) {
+      const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
       const args = ['-y', '-loglevel', 'error'];
       if (startSeconds > 0 && !isGif) args.push('-ss', String(startSeconds));
       args.push(
