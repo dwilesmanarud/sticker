@@ -636,6 +636,77 @@ async function downloadPinterestMedia(rawUrl) {
   throw new Error('Media video/gambar tidak ditemukan pada link Pinterest tersebut (pastikan pin bersifat publik).');
 }
 
+function extractWebpFramePayload(buf) {
+  if (buf.length < 20 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WEBP') {
+    return { payload: Buffer.alloc(0), hasAlpha: false };
+  }
+  const parts = [];
+  let hasAlpha = false;
+  let pos = 12;
+  while (pos + 8 <= buf.length) {
+    const tag = buf.toString('ascii', pos, pos + 4);
+    const size = buf.readUInt32LE(pos + 4);
+    const padded = size + (size % 2);
+    const end = pos + 8 + padded;
+    if (end > buf.length) break;
+    if (tag === 'ALPH' || tag === 'VP8 ' || tag === 'VP8L') {
+      if (tag === 'ALPH' || tag === 'VP8L') hasAlpha = true;
+      parts.push(buf.subarray(pos, end));
+    }
+    pos = end;
+  }
+  return { payload: Buffer.concat(parts), hasAlpha };
+}
+
+function writeUInt24LE(buf, val, offset) {
+  buf[offset] = val & 0xff;
+  buf[offset + 1] = (val >> 8) & 0xff;
+  buf[offset + 2] = (val >> 16) & 0xff;
+}
+
+function muxAnimatedWebp(frameBuffers, fps, width = 512, height = 512) {
+  const frameMs = Math.max(20, Math.round(1000 / fps));
+  const anmfChunks = [];
+  let hasAlpha = false;
+
+  for (const fb of frameBuffers) {
+    const { payload, hasAlpha: fAlpha } = extractWebpFramePayload(fb);
+    if (!payload.length) continue;
+    if (fAlpha) hasAlpha = true;
+    const chunkSize = 16 + payload.length;
+    const header = Buffer.alloc(24);
+    header.write('ANMF', 0, 4, 'ascii');
+    header.writeUInt32LE(chunkSize, 4);
+    writeUInt24LE(header, 0, 8);
+    writeUInt24LE(header, 0, 11);
+    writeUInt24LE(header, width - 1, 14);
+    writeUInt24LE(header, height - 1, 17);
+    writeUInt24LE(header, frameMs, 20);
+    header[23] = 0x02;
+    anmfChunks.push(header, payload);
+    if (chunkSize % 2 === 1) anmfChunks.push(Buffer.alloc(1));
+  }
+
+  const vp8x = Buffer.alloc(18);
+  vp8x.write('VP8X', 0, 4, 'ascii');
+  vp8x.writeUInt32LE(10, 4);
+  vp8x[8] = hasAlpha ? 0x12 : 0x02;
+  writeUInt24LE(vp8x, width - 1, 12);
+  writeUInt24LE(vp8x, height - 1, 15);
+
+  const anim = Buffer.alloc(14);
+  anim.write('ANIM', 0, 4, 'ascii');
+  anim.writeUInt32LE(6, 4);
+  anim.writeUInt32LE(0, 8);
+  anim.writeUInt16LE(0, 12);
+
+  const body = Buffer.concat([Buffer.from('WEBP', 'ascii'), vp8x, anim, ...anmfChunks]);
+  const riff = Buffer.alloc(8);
+  riff.write('RIFF', 0, 4, 'ascii');
+  riff.writeUInt32LE(body.length, 4);
+  return Buffer.concat([riff, body]);
+}
+
 /**
  * Mengonversi gambar statis, GIF, atau video tanpa suara menjadi stiker WebP 512x512 (<= 500 KiB).
  */
@@ -680,18 +751,20 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
       return { sticker: webp, isAnimated: false };
     }
 
-    // Video tanpa suara atau GIF animasi -> WebP animasi 512x512 bersih (yuva420p + kualitas tinggi, maks 500 KiB)
+    // Video tanpa suara atau GIF animasi -> frame libwebp independen + RIFF muxer (bebas garis-garis, <= 500 KiB)
     const presets = [
-      [20, 62],
       [15, 55],
-      [12, 50],
-      [10, 45],
-      [8, 38],
+      [12, 48],
+      [10, 42],
+      [8, 36],
       [6, 30],
       [5, 22],
     ];
-    for (const [fps, quality] of presets) {
-      const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000,format=yuva420p`;
+    for (let pi = 0; pi < presets.length; pi++) {
+      const [fps, quality] = presets[pi];
+      const fDir = path.join(dir, `f_${pi}`);
+      await fs.mkdir(fDir, { recursive: true });
+      const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
       const args = ['-y', '-loglevel', 'error'];
       if (startSeconds > 0 && !isGif) args.push('-ss', String(startSeconds));
       args.push(
@@ -703,16 +776,12 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
         '-vf',
         filter,
         '-c:v',
-        'libwebp_anim',
-        '-preset',
-        'default',
+        'libwebp',
         '-q:v',
         String(quality),
-        '-loop',
-        '0',
         '-compression_level',
         '4',
-        outPath
+        path.join(fDir, 'f_%04d.webp')
       );
       await new Promise((resolve, reject) => {
         execFile(ffmpegPath, args, { windowsHide: true, timeout: 60_000 }, (err, _stdout, stderr) => {
@@ -720,9 +789,13 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
           else resolve();
         });
       });
-      const st = await fs.stat(outPath);
-      if (st.size <= maxBytes) {
-        return { sticker: await fs.readFile(outPath), isAnimated: true };
+      const frameFiles = (await fs.readdir(fDir)).filter((f) => f.endsWith('.webp')).sort();
+      if (frameFiles.length >= 2) {
+        const frameBufs = await Promise.all(frameFiles.map((f) => fs.readFile(path.join(fDir, f))));
+        const muxed = muxAnimatedWebp(frameBufs, fps, 512, 512);
+        if (muxed.length <= maxBytes) {
+          return { sticker: muxed, isAnimated: true };
+        }
       }
     }
     throw new Error('Ukuran stiker animasi Pinterest melebihi batas 500 KiB.');
