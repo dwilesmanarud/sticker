@@ -16,20 +16,20 @@ try {
     changed = true;
   }
 
-  // 2. Batas durasi aman WhatsApp audioStickerMessage: 5 detik
-  if (/export const SOUND_STICKER_MAX_SECONDS = (?!5;)/.test(src)) {
+  // 2. Batas durasi maksimal: 15 detik
+  if (/export const SOUND_STICKER_MAX_SECONDS = (?!15;)/.test(src)) {
     src = src.replace(
       /export const SOUND_STICKER_MAX_SECONDS = \d+;/,
-      'export const SOUND_STICKER_MAX_SECONDS = 5;'
+      'export const SOUND_STICKER_MAX_SECONDS = 15;'
     );
     changed = true;
   }
 
-  // 3. Batas ukuran audio standar: 128 KiB
-  if (/const MAX_AUDIO_BYTES = (?!128 \* 1024;)/.test(src)) {
+  // 3. Batas ukuran audio: 256 KiB agar cukup untuk durasi hingga 15 detik
+  if (/const MAX_AUDIO_BYTES = (?!256 \* 1024;)/.test(src)) {
     src = src.replace(
       /const MAX_AUDIO_BYTES = [^;]+;/,
-      'const MAX_AUDIO_BYTES = 128 * 1024;'
+      'const MAX_AUDIO_BYTES = 256 * 1024;'
     );
     changed = true;
   }
@@ -62,9 +62,9 @@ try {
 
   if (changed) {
     await fs.writeFile(target, src, 'utf8');
-    console.log('✅ Patched sound-sticker.js (24 FPS, maks. 5 detik, WebP 500 KiB, avoid_negative_ts)');
+    console.log('✅ Patched sound-sticker.js (24 FPS, maks. 15 detik, WebP 500 KiB, avoid_negative_ts)');
   } else {
-    console.log('ℹ️ Patch sound-sticker.js (24 FPS, maks. 5 detik, WebP 500 KiB) sudah aktif');
+    console.log('ℹ️ Patch sound-sticker.js (24 FPS, maks. 15 detik, WebP 500 KiB) sudah aktif');
   }
 } catch (err) {
   console.warn('⚠️ Lewati patch sound-sticker.js:', err.message);

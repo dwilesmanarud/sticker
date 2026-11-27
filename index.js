@@ -373,7 +373,7 @@ function getStatusSnapshot() {
   return {
     developer: DEVELOPER_NAME,
     fps: 24,
-    maxSeconds: 5,
+    maxSeconds: 15,
     totalCount: list.length,
     activeCount: list.filter((s) => s.status === 'open').length,
     sessions: list,
