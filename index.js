@@ -419,14 +419,14 @@ async function downloadPinterestMedia(rawUrl) {
 }
 
 /**
- * Mengonversi gambar statis, GIF, atau video tanpa suara menjadi stiker WebP 512x512 (<= 1024 KiB).
+ * Mengonversi gambar statis, GIF, atau video tanpa suara menjadi stiker WebP 512x512 (<= 500 KiB).
  */
 async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = false, startSeconds = 0 } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-webp-stk-'));
   const ext = isGif ? '.gif' : isAnimated ? '.mp4' : '.img';
   const inPath = path.join(dir, `in${ext}`);
   const outPath = path.join(dir, 'sticker.webp');
-  const maxBytes = 1024 * 1024;
+  const maxBytes = 500 * 1024;
 
   try {
     await fs.writeFile(inPath, buffer);
@@ -462,14 +462,15 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
       return { sticker: webp, isAnimated: false };
     }
 
-    // Video tanpa suara atau GIF animasi -> WebP animasi 512x512
+    // Video tanpa suara atau GIF animasi -> WebP animasi 512x512 (maks 500 KiB agar aman di WhatsApp)
     const presets = [
-      [24, 72, 512],
-      [20, 55, 512],
-      [15, 45, 384],
-      [12, 36, 384],
-      [10, 30, 320],
+      [24, 70, 512],
+      [20, 50, 512],
+      [15, 42, 384],
+      [12, 35, 384],
+      [10, 28, 320],
       [8, 22, 256],
+      [5, 12, 256],
     ];
     for (const [fps, quality, scaleSize] of presets) {
       const denoise = scaleSize >= 512 ? 'hqdn3d=1.2:1.2:5:5' : 'hqdn3d=1.5:1.5:6:6';
@@ -477,7 +478,7 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
         scaleSize >= 512
           ? 'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,unsharp=3:3:0.3:3:3:0.0'
           : `scale=${scaleSize}:${scaleSize}:force_original_aspect_ratio=decrease:flags=lanczos,scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos`;
-      const filter = `fps=${fps},${denoise},${scaleChain},format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
+      const filter = `fps=${fps},format=yuv420p,${denoise},${scaleChain},format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
       const args = ['-y', '-loglevel', 'error'];
       if (startSeconds > 0 && !isGif) args.push('-ss', String(startSeconds));
       args.push(
@@ -509,7 +510,7 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
         return { sticker: await fs.readFile(outPath), isAnimated: true };
       }
     }
-    throw new Error('Ukuran stiker animasi Pinterest melebihi batas 1024 KiB.');
+    throw new Error('Ukuran stiker animasi Pinterest melebihi batas 500 KiB.');
   } finally {
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
   }

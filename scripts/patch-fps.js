@@ -4,12 +4,12 @@ import path from 'node:path';
 const target = path.resolve('node_modules/@xbibzlibrary/whatsbibz/lib/Utils/sound-sticker.js');
 
 const OPTIMIZED_LOOP = `    let sticker;
-    for (const [fps, quality, scaleSize] of [[24, 72, 512], [24, 58, 512], [20, 50, 512], [16, 45, 512], [15, 42, 384], [12, 36, 384], [10, 32, 320], [8, 24, 320], [6, 16, 256]]) {
+    for (const [fps, quality, scaleSize] of [[24, 70, 512], [24, 55, 512], [20, 48, 512], [15, 42, 384], [12, 35, 384], [10, 28, 320], [8, 22, 320], [6, 16, 256], [5, 12, 256]]) {
       const denoise = scaleSize >= 512 ? 'hqdn3d=1.2:1.2:5:5' : 'hqdn3d=1.5:1.5:6:6';
       const scaleChain = scaleSize >= 512
         ? 'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,unsharp=3:3:0.3:3:3:0.0'
         : \`scale=\${scaleSize}:\${scaleSize}:force_original_aspect_ratio=decrease:flags=lanczos,scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos\`;
-      const filter = \`fps=\${fps},\${denoise},\${scaleChain},format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000\`;
+      const filter = \`fps=\${fps},format=yuv420p,\${denoise},\${scaleChain},format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000\`;
       await run(ffmpeg, [...common, '-map', '0:v:0', '-an', '-vf', filter, '-c:v', 'libwebp_anim', '-q:v', String(quality),
         '-loop', '0', '-compression_level', '5', '-y', webpPath], timeoutMs);
       const size = (await stat(webpPath)).size;
@@ -23,11 +23,11 @@ try {
   let src = await fs.readFile(target, 'utf8');
   let changed = false;
 
-  // 1. Batas ukuran WebP: 1024 KiB (1 MiB) agar kualitas tajam & 24 FPS tetap mulus
-  if (/export const SOUND_STICKER_MAX_WEBP_BYTES = (?!1024 \* 1024;)/.test(src)) {
+  // 1. Batas ukuran WebP standar WhatsApp: 500 KiB (di atas 500 KiB WhatsApp HP menolak/menampilkan stiker warna-warni)
+  if (/export const SOUND_STICKER_MAX_WEBP_BYTES = (?!500 \* 1024;)/.test(src)) {
     src = src.replace(
       /export const SOUND_STICKER_MAX_WEBP_BYTES = [^;]+;/,
-      'export const SOUND_STICKER_MAX_WEBP_BYTES = 1024 * 1024;'
+      'export const SOUND_STICKER_MAX_WEBP_BYTES = 500 * 1024;'
     );
     changed = true;
   }
@@ -68,27 +68,27 @@ try {
     changed = true;
   }
 
-  // 6. Optimasi loop encode WebP: denoise ringan (hqdn3d) + unsharp + tangga FPS/resolusi pintar (tetap full 512x512 <= 500 KiB)
+  // 6. Optimasi loop encode WebP: format=yuv420p (anti glitch warna HDR) + denoise ringan (hqdn3d) + unsharp + tangga FPS/resolusi pintar (<= 500 KiB)
   const loopRegex = /    let sticker;\r?\n    for \(const \[[^\]]+\] of \[[\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
-  if (loopRegex.test(src) && !src.includes('hqdn3d=1.2:1.2:5:5')) {
+  if (loopRegex.test(src) && !src.includes('format=yuv420p,${denoise}')) {
     src = src.replace(loopRegex, OPTIMIZED_LOOP);
     changed = true;
   }
 
-  // 7. Selaraskan pesan error WebP dengan batas 1024 KiB
-  if (/Could not fit the animated sticker into (?!1024)\d+ KiB\./.test(src)) {
+  // 7. Selaraskan pesan error WebP dengan batas 500 KiB
+  if (/Could not fit the animated sticker into (?!500)\d+ KiB\./.test(src)) {
     src = src.replace(
       /Could not fit the animated sticker into \d+ KiB\./,
-      'Could not fit the animated sticker into 1024 KiB.'
+      'Could not fit the animated sticker into 500 KiB.'
     );
     changed = true;
   }
 
   if (changed) {
     await fs.writeFile(target, src, 'utf8');
-    console.log('✅ Patched sound-sticker.js (24 FPS, tajam+denoise, maks. 15 detik, WebP 1024 KiB, avoid_negative_ts)');
+    console.log('✅ Patched sound-sticker.js (24 FPS, tajam+denoise, yuv420p, maks. 15 detik, WebP 500 KiB, avoid_negative_ts)');
   } else {
-    console.log('ℹ️ Patch sound-sticker.js (24 FPS, tajam+denoise, maks. 15 detik, WebP 1024 KiB) sudah aktif');
+    console.log('ℹ️ Patch sound-sticker.js (24 FPS, tajam+denoise, yuv420p, maks. 15 detik, WebP 500 KiB) sudah aktif');
   }
 } catch (err) {
   console.warn('⚠️ Lewati patch sound-sticker.js:', err.message);
