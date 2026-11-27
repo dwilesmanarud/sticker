@@ -23,11 +23,11 @@ try {
   let src = await fs.readFile(target, 'utf8');
   let changed = false;
 
-  // 1. Batas ukuran WebP standar WhatsApp: 500 KiB
-  if (/export const SOUND_STICKER_MAX_WEBP_BYTES = (?!500 \* 1024;)/.test(src)) {
+  // 1. Batas ukuran WebP: 1024 KiB (1 MiB) agar kualitas tajam & 24 FPS tetap mulus
+  if (/export const SOUND_STICKER_MAX_WEBP_BYTES = (?!1024 \* 1024;)/.test(src)) {
     src = src.replace(
       /export const SOUND_STICKER_MAX_WEBP_BYTES = [^;]+;/,
-      'export const SOUND_STICKER_MAX_WEBP_BYTES = 500 * 1024;'
+      'export const SOUND_STICKER_MAX_WEBP_BYTES = 1024 * 1024;'
     );
     changed = true;
   }
@@ -75,20 +75,20 @@ try {
     changed = true;
   }
 
-  // 7. Selaraskan pesan error WebP dengan batas 500 KiB
-  if (src.includes('Could not fit the animated sticker into 1000 KiB.')) {
+  // 7. Selaraskan pesan error WebP dengan batas 1024 KiB
+  if (/Could not fit the animated sticker into (?!1024)\d+ KiB\./.test(src)) {
     src = src.replace(
-      'Could not fit the animated sticker into 1000 KiB.',
-      'Could not fit the animated sticker into 500 KiB.'
+      /Could not fit the animated sticker into \d+ KiB\./,
+      'Could not fit the animated sticker into 1024 KiB.'
     );
     changed = true;
   }
 
   if (changed) {
     await fs.writeFile(target, src, 'utf8');
-    console.log('✅ Patched sound-sticker.js (24 FPS, tajam+denoise, maks. 15 detik, WebP 500 KiB, avoid_negative_ts)');
+    console.log('✅ Patched sound-sticker.js (24 FPS, tajam+denoise, maks. 15 detik, WebP 1024 KiB, avoid_negative_ts)');
   } else {
-    console.log('ℹ️ Patch sound-sticker.js (24 FPS, tajam+denoise, maks. 15 detik, WebP 500 KiB) sudah aktif');
+    console.log('ℹ️ Patch sound-sticker.js (24 FPS, tajam+denoise, maks. 15 detik, WebP 1024 KiB) sudah aktif');
   }
 } catch (err) {
   console.warn('⚠️ Lewati patch sound-sticker.js:', err.message);
