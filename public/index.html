@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#00c896">
+  <meta name="description" content="WhatsApp Sound Sticker Bot (24 FPS, Multi-Nomor Pairing HP) oleh Rudi Dwi Lesmana.">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Sound Sticker Bot">
+  <title>WhatsApp Sound Sticker Bot — Rudi Dwi Lesmana</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="/icons/icon.svg">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <a href="#" class="brand">
+        <span class="brand-icon" aria-hidden="true">🎵</span>
+        <div>
+          <span class="brand-title">Sound Sticker Bot</span>
+          <span class="brand-sub">Developer: Rudi Dwi Lesmana · Multi-Nomor</span>
+        </div>
+      </a>
+
+      <nav class="topnav" aria-label="Navigasi utama">
+        <a href="#koneksi">Pairing Nomor HP</a>
+        <a href="#studio">Buat Stiker</a>
+        <a href="#menu">Fitur &amp; Log</a>
+      </nav>
+
+      <div class="topbar-meta">
+        <button type="button" id="install-btn" class="btn btn-primary btn-sm" hidden>
+          📲 Install App
+        </button>
+        <span id="status-pill" class="pill">
+          <span class="dot" aria-hidden="true"></span>
+          <span id="status-label">0/0 Nomor Aktif</span>
+        </span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero Section -->
+    <section class="hero">
+      <div class="container hero-grid">
+        <div class="hero-copy">
+          <span class="hero-chip">👨‍💻 Developer: Rudi Dwi Lesmana · Multi-Nomor Pairing HP</span>
+          <h1 class="hero-title">
+            WhatsApp <span class="gradient-text">Sound Sticker</span> Bot
+          </h1>
+          <p class="hero-desc">
+            Tautkan banyak nomor WhatsApp sekaligus hanya dengan <strong>Pairing Nomor HP</strong>, lalu ubah video bersuara (maks. 15 detik) menjadi <strong>Sound Sticker 24 FPS</strong>.
+          </p>
+          <div class="hero-actions">
+            <a href="#koneksi" class="btn btn-primary">🔑 Tambah &amp; Pairing Nomor HP</a>
+            <a href="#studio" class="btn btn-secondary">🎬 Buat dari Web</a>
+          </div>
+        </div>
+
+        <div class="hero-stats">
+          <div class="stat-card">
+            <span class="stat-label">Nomor Aktif</span>
+            <strong id="stat-active" class="stat-value">0</strong>
+            <span id="stat-total" class="muted">dari 0 nomor terdaftar</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Stiker Dibuat</span>
+            <strong id="stat-stickers" class="stat-value">0</strong>
+            <span class="muted">24 FPS · maks. 15 detik</span>
+          </div>
+          <div class="stat-card">
+            <span class="stat-label">Perintah Ping</span>
+            <strong id="stat-pings" class="stat-value">0</strong>
+            <span class="muted">respon .ping → pong</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 1: Multi-Nomor Pairing HP -->
+    <section id="koneksi" class="section">
+      <div class="container">
+        <div class="section-head">
+          <div>
+            <h2>🔑 Pairing Banyak Nomor HP (Maks. 10 Nomor)</h2>
+            <p class="muted">Masukkan nama &amp; nomor HP untuk langsung membuat sesi baru dan mendapatkan kode 8 digit. Di HP: <strong>WhatsApp → Perangkat Tertaut → Tautkan Perangkat → Tautkan dengan nomor telepon</strong>.</p>
+          </div>
+        </div>
+
+        <form id="add-session-form" class="card create-bar" novalidate>
+          <div class="create-field">
+            <label for="new-session-name">Nama Nomor / Akun</label>
+            <input
+              type="text"
+              id="new-session-name"
+              name="name"
+              maxlength="40"
+              placeholder="misal: HP Kedua / Bot Rudi"
+              required
+            >
+          </div>
+          <div class="create-field">
+            <label for="new-session-phone">Nomor WhatsApp (opsional langsung minta kode)</label>
+            <input
+              type="tel"
+              id="new-session-phone"
+              name="phone"
+              placeholder="081234567890 atau +62 812..."
+            >
+          </div>
+          <button type="submit" id="add-session-btn" class="btn btn-primary">
+            + Tambah &amp; Pairing Nomor
+          </button>
+        </form>
+
+        <div id="sessions-grid" class="sessions-grid"></div>
+      </div>
+    </section>
+
+    <!-- Section 2: Studio Sound Sticker (Web) -->
+    <section id="studio" class="section">
+      <div class="container studio-grid">
+        <div class="card">
+          <div class="card-header">
+            <h3>🎬 Buat Sound Sticker dari Video</h3>
+            <span class="badge">24 FPS · Maks. 15 Detik</span>
+          </div>
+
+          <form id="convert-form" class="form-stack" novalidate>
+            <div class="field">
+              <label for="video-input">File Video Bersuara (MP4 / MOV)</label>
+              <span id="video-hint" class="hint">Maksimal 20 MB, otomatis dipotong maks. 15 detik pertama dengan animasi 24 FPS.</span>
+              <input
+                type="file"
+                id="video-input"
+                name="video"
+                accept="video/mp4,video/quicktime,.mp4,.mov"
+                required
+                aria-describedby="video-hint"
+              >
+            </div>
+
+            <div class="field">
+              <label for="target-mode">Tujuan Hasil</label>
+              <span id="target-hint" class="hint">Pratinjau di web saja, atau langsung kirim sebagai Sound Sticker ke WhatsApp.</span>
+              <select id="target-mode" name="targetMode" class="select-input" aria-describedby="target-hint">
+                <option value="preview">Pratinjau &amp; Unduh di Web saja</option>
+                <option value="self">Langsung Kirim ke Self-Chat (Nomor Bot)</option>
+                <option value="phone">Langsung Kirim ke Nomor WhatsApp Lain</option>
+              </select>
+            </div>
+
+            <div id="sender-group" class="field" hidden>
+              <label for="sender-session">Kirim Menggunakan Nomor Bot</label>
+              <select id="sender-session" name="sessionId" class="select-input"></select>
+            </div>
+
+            <div id="phone-group" class="field" hidden>
+              <label for="target-phone">Nomor WhatsApp Tujuan</label>
+              <span id="phone-hint" class="hint">Contoh: 081234567890 atau 6281234567890</span>
+              <input
+                type="tel"
+                id="target-phone"
+                name="phone"
+                placeholder="081234567890"
+                aria-describedby="phone-hint"
+              >
+            </div>
+
+            <button type="submit" id="convert-btn" class="btn btn-primary">
+              Konversi Video (24 FPS)
+            </button>
+          </form>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>✨ Hasil Stiker yang Telah Dibuat</h3>
+            <span id="gallery-count" class="badge">0 stiker</span>
+          </div>
+
+          <div id="gallery-empty" class="empty-state">
+            <p>Belum ada stiker yang dibuat.</p>
+            <p class="muted">Buat dari video di sebelah kiri atau kirim <code>.Sticker</code> di WhatsApp—hasilnya otomatis muncul di sini.</p>
+          </div>
+
+          <div id="gallery-list" class="sticker-grid"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 3: Menu Fitur & Log Aktivitas -->
+    <section id="menu" class="section">
+      <div class="container studio-grid">
+        <div class="card">
+          <div class="card-header">
+            <h3>📖 Menu &amp; Perintah WhatsApp</h3>
+            <span class="badge">Dev: Rudi Dwi Lesmana</span>
+          </div>
+          <div class="form-stack">
+            <div class="cmd-card">
+              <code>.menu</code> <span class="muted">atau <code>.help</code></span>
+              <p>Menampilkan nama developer (<strong>Rudi Dwi Lesmana</strong>) dan daftar seluruh fitur bot.</p>
+            </div>
+            <div class="cmd-card">
+              <code>.ping</code>
+              <p>Mengecek respons bot (membalas <code>pong</code>).</p>
+            </div>
+            <div class="cmd-card">
+              <code>.Sticker</code>
+              <p>Kirim atau reply video MP4/MOV bersuara → otomatis dikonversi menjadi <strong>Sound Sticker</strong> (wajib ada audio). Untuk akun sendiri aktif di <em>self-chat</em>.</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <h3>📡 Log Aktivitas Live</h3>
+            <span class="badge">Real-time SSE</span>
+          </div>
+          <div id="activity-log" class="log-box">
+            <p class="muted">Menunggu aktivitas bot...</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container footer-inner">
+      <span>WhatsApp Sound Sticker Bot · Developer: <strong>Rudi Dwi Lesmana</strong></span>
+      <span id="access-info" class="muted"></span>
+    </div>
+  </footer>
+
+  <!-- Modal Konfirmasi Universal (Lepas Pairing / Hapus Nomor) -->
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" closedby="any">
+    <h1 id="confirm-title" class="dialog-title">Konfirmasi</h1>
+    <p id="confirm-desc" class="dialog-desc"></p>
+    <form method="dialog" class="dialog-actions">
+      <button value="cancel" class="btn btn-secondary" autofocus>Batal</button>
+      <button value="confirm" id="confirm-ok" class="btn btn-danger">Lanjutkan</button>
+    </form>
+  </dialog>
+
+  <!-- Modal Panduan Install iOS Safari -->
+  <dialog id="ios-install-dialog" aria-labelledby="ios-install-title" closedby="any">
+    <h1 id="ios-install-title" class="dialog-title">Install di iPhone / iPad</h1>
+    <p class="dialog-desc">Untuk memasang aplikasi ini di layar utama Safari:</p>
+    <ol class="dialog-steps">
+      <li>Ketuk tombol <strong>Bagikan (Share)</strong> di bagian bawah browser Safari.</li>
+      <li>Pilih <strong>Tambah ke Layar Utama (Add to Home Screen)</strong>, lalu ketuk <strong>Tambah</strong>.</li>
+    </ol>
+    <form method="dialog" class="dialog-actions">
+      <button value="close" class="btn btn-primary" autofocus>Mengerti</button>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
