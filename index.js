@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -12,6 +12,7 @@ const {
   Browsers,
   DisconnectReason,
   convertVideoToSoundSticker,
+  downloadMediaMessage,
   downloadVideoForSoundSticker,
   sendVideoAsSoundSticker,
   useMultiFileAuthState,
@@ -95,6 +96,103 @@ async function resolveMediaBinaries() {
 
 const { ffmpegPath, ffprobePath } = await resolveMediaBinaries();
 const logger = pino({ level: process.env.LOG_LEVEL || 'silent' });
+
+// Sesi sementara 2 langkah untuk perintah .gantisuara di WhatsApp (berlaku 2 menit)
+const pendingCustomAudio = new Map();
+
+/**
+ * Menggabungkan video (MP4/MOV) dengan trek audio kustom (MP3/WAV/M4A/OGG/WebM/VN)
+ * menjadi buffer MP4 baru agar bisa langsung diproses oleh sendVideoAsSoundSticker.
+ */
+async function mergeVideoWithCustomAudio(videoBuffer, audioBuffer, audioExt = '.audio') {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-custom-audio-'));
+  const safeExt = audioExt.startsWith('.') ? audioExt : `.${audioExt}`;
+  const videoIn = path.join(dir, 'in.mp4');
+  const audioIn = path.join(dir, `in${safeExt}`);
+  const mergedOut = path.join(dir, 'merged.mp4');
+
+  try {
+    await fs.writeFile(videoIn, videoBuffer);
+    await fs.writeFile(audioIn, audioBuffer);
+
+    await new Promise((resolve, reject) => {
+      execFile(
+        ffmpegPath,
+        [
+          '-y',
+          '-i',
+          videoIn,
+          '-i',
+          audioIn,
+          '-map',
+          '0:v:0',
+          '-map',
+          '1:a:0',
+          '-c:v',
+          'copy',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '128k',
+          '-ar',
+          '48000',
+          '-ac',
+          '1',
+          '-shortest',
+          '-movflags',
+          '+faststart',
+          mergedOut,
+        ],
+        { windowsHide: true, timeout: 45_000 },
+        (err, _stdout, stderr) => {
+          if (err) {
+            reject(new Error(`Gagal menggabungkan video & audio kustom: ${stderr?.slice(-200) || err.message}`));
+          } else {
+            resolve();
+          }
+        }
+      );
+    });
+
+    return await fs.readFile(mergedOut);
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+function guessAudioExtFromMime(mime = '', originalName = '') {
+  const ext = path.extname(originalName || '').toLowerCase();
+  if (['.mp3', '.wav', '.m4a', '.ogg', '.opus', '.aac', '.webm', '.flac'].includes(ext)) return ext;
+  const m = mime.toLowerCase();
+  if (m.includes('mpeg') || m.includes('mp3')) return '.mp3';
+  if (m.includes('wav')) return '.wav';
+  if (m.includes('mp4') || m.includes('m4a') || m.includes('aac')) return '.m4a';
+  if (m.includes('ogg') || m.includes('opus')) return '.ogg';
+  if (m.includes('webm')) return '.webm';
+  return '.audio';
+}
+
+function unwrapWaMessage(message) {
+  let current = message;
+  while (current) {
+    if (current.ephemeralMessage?.message) current = current.ephemeralMessage.message;
+    else if (current.viewOnceMessage?.message) current = current.viewOnceMessage.message;
+    else if (current.viewOnceMessageV2?.message) current = current.viewOnceMessageV2.message;
+    else if (current.documentWithCaptionMessage?.message) current = current.documentWithCaptionMessage.message;
+    else break;
+  }
+  return current || null;
+}
+
+function hasAudioPayload(unwrapped) {
+  if (!unwrapped) return false;
+  if (unwrapped.audioMessage) return true;
+  const doc = unwrapped.documentMessage;
+  if (!doc) return false;
+  const mime = (doc.mimetype || '').toLowerCase();
+  const ext = path.extname(doc.fileName || '').toLowerCase();
+  return mime.startsWith('audio/') || ['.mp3', '.wav', '.m4a', '.ogg', '.opus', '.aac'].includes(ext);
+}
 
 // State bersama multi-nomor antara bot WhatsApp & Web App (SSE)
 const sessions = new Map();
@@ -221,10 +319,10 @@ function printStartupBanner() {
   console.log(`   👨‍💻 Developer : ${DEVELOPER_NAME}`);
   console.log('========================================================');
   console.log('   Fitur & Perintah:');
-  console.log('   • .menu    - Menampilkan info developer & daftar fitur');
-  console.log('   • .ping    - Cek status bot (balas pong)');
-  console.log('   • .Sticker - Ubah video bersuara jadi sound sticker');
-  console.log('                (via caption atau reply video)');
+  console.log('   • .menu       - Menampilkan info developer & daftar fitur');
+  console.log('   • .ping       - Cek status bot (balas pong)');
+  console.log('   • .Sticker    - Ubah video bersuara jadi sound sticker');
+  console.log('   • .gantisuara - Ubah video jadi sound sticker dengan suara sendiri');
   console.log('========================================================\n');
 }
 
@@ -237,12 +335,17 @@ function buildMenuText() {
     '• `.menu` — Menampilkan menu & daftar fitur bot',
     '• `.ping` — Mengecek apakah bot sedang aktif (`pong`)',
     '• `.Sticker` — Mengubah video bersuara menjadi *Sound Sticker*',
+    '• `.gantisuara` — Mengganti suara video dengan *Voice Note / audio sendiri* lalu jadi Sound Sticker',
     '',
     '*Cara Pakai `.Sticker`:*',
     '1. Kirim video MP4/MOV yang ada suaranya dengan caption `.Sticker`, atau',
     '2. Reply video bersuara di chat lalu ketik `.Sticker`.',
     '',
-    '_Catatan: Video wajib memiliki suara (bukan GIF/bisu). Untuk akun sendiri, perintah aktif di self-chat._',
+    '*Cara Pakai `.gantisuara`:*',
+    '1. Kirim/reply video dengan `.gantisuara`.',
+    '2. Lalu kirim *Voice Note* atau *file audio* (MP3/WAV/M4A) sebagai suara penggantinya.',
+    '',
+    '_Catatan: Untuk akun sendiri, perintah aktif di self-chat._',
   ].join('\n');
 }
 
@@ -554,6 +657,88 @@ async function connectSession(sessionId) {
           continue;
         }
 
+        if (cmd === '.gantisuara') {
+          try {
+            const videoBuffer = await downloadVideoForSoundSticker(msg);
+            const senderKey = `${rec.id}::${jid}::${msg.key.fromMe ? 'self' : msg.key.participant || jid}`;
+            pendingCustomAudio.set(senderKey, {
+              videoBuffer,
+              expiresAt: Date.now() + 2 * 60 * 1000,
+            });
+            await sock.sendMessage(
+              jid,
+              {
+                text: '🎬 *Video diterima!* Sekarang kirim *Voice Note* atau *file audio* (MP3/WAV/M4A) dalam 2 menit sebagai suara penggantinya.',
+              },
+              { quoted: msg }
+            );
+            pushLog(`🎧 [${rec.name}] .gantisuara menunggu audio pengganti dari ${normalizeUser(jid)}`);
+          } catch (err) {
+            await sock.sendMessage(
+              jid,
+              {
+                text: `⚠️ Kirim atau reply video MP4/MOV dengan \`.gantisuara\` terlebih dahulu. (${err?.message || err})`,
+              },
+              { quoted: msg }
+            );
+          }
+          continue;
+        }
+
+        // Cek apakah pesan ini menyelesaikan langkah ke-2 dari .gantisuara (mengirim VN/file audio)
+        const unwrapped = unwrapWaMessage(msg.message);
+        const senderKey = `${rec.id}::${jid}::${msg.key.fromMe ? 'self' : msg.key.participant || jid}`;
+        const pending = pendingCustomAudio.get(senderKey);
+        if (pending && Date.now() <= pending.expiresAt && hasAudioPayload(unwrapped)) {
+          pendingCustomAudio.delete(senderKey);
+          await sock.sendMessage(
+            jid,
+            { text: '⏳ Menggabungkan video dengan suara pilihan Anda & membuat sticker...' },
+            { quoted: msg }
+          );
+          try {
+            const audioBuffer = await downloadMediaMessage(
+              { key: msg.key, message: unwrapped },
+              'buffer',
+              {},
+              { logger, reuploadRequest: sock.updateMediaMessage }
+            );
+            const mime =
+              unwrapped.audioMessage?.mimetype || unwrapped.documentMessage?.mimetype || 'audio/ogg';
+            const fileName = unwrapped.documentMessage?.fileName || '';
+            const mergedVideo = await mergeVideoWithCustomAudio(
+              pending.videoBuffer,
+              audioBuffer,
+              guessAudioExtFromMime(mime, fileName)
+            );
+            await sendVideoAsSoundSticker(sock, jid, mergedVideo, {
+              quoted: msg,
+              ffmpegPath,
+              ffprobePath,
+            });
+            pushLog(`✅ [${rec.name}] Sound sticker suara kustom terkirim ke ${normalizeUser(jid)}`);
+            convertVideoToSoundSticker(mergedVideo, { ffmpegPath, ffprobePath })
+              .then((conv) =>
+                archiveCreatedSticker({
+                  stickerBuffer: conv.sticker,
+                  audioBuffer: conv.audio,
+                  seconds: conv.seconds,
+                  source: `WA Ganti Suara`,
+                  name: `Stiker Kustom ${new Date().toLocaleTimeString('id-ID', { hour12: false })}`,
+                })
+              )
+              .catch(() => {});
+          } catch (err) {
+            pushLog(`❌ [${rec.name}] .gantisuara gagal: ${err?.message || err}`);
+            await sock.sendMessage(
+              jid,
+              { text: `❌ Gagal mengganti suara sticker: ${err?.message || err}` },
+              { quoted: msg }
+            );
+          }
+          continue;
+        }
+
         if (cmd === '.sticker') {
           await sock.sendMessage(jid, { text: 'Sedang membuat sticker...' }, { quoted: msg });
           pushLog(`🎬 [${rec.name}] Memproses .Sticker dari ${normalizeUser(jid)}...`);
@@ -772,73 +957,102 @@ function startWebApp() {
     res.json({ deleted: true });
   });
 
-  // Konversi video bersuara -> sound sticker (24 FPS, maks. 10 detik) & opsional kirim dari sesi pilihan
-  app.post('/api/sound-sticker', upload.single('video'), async (req, res) => {
-    try {
-      if (!req.file?.buffer?.length) {
-        return res.status(400).json({ error: 'Unggah file video MP4/MOV yang memiliki suara.' });
-      }
+  // Konversi video -> sound sticker (mendukung opsional ganti suara dengan audio upload / rekaman mikrofon)
+  app.post(
+    '/api/sound-sticker',
+    upload.fields([
+      { name: 'video', maxCount: 1 },
+      { name: 'audio', maxCount: 1 },
+    ]),
+    async (req, res) => {
+      try {
+        const videoFile = req.files?.video?.[0];
+        const customAudioFile = req.files?.audio?.[0];
 
-      const targetMode = String(req.body?.targetMode || 'preview').trim();
-      const targetPhone = formatIndonesianPhone(req.body?.phone);
-      const requestedSessionId = String(req.body?.sessionId || '').trim();
-
-      const converted = await convertVideoToSoundSticker(req.file.buffer, {
-        ffmpegPath,
-        ffprobePath,
-      });
-
-      let sentTo = null;
-      if (targetMode === 'self' || targetMode === 'phone') {
-        const activeSession =
-          (requestedSessionId && sessions.get(requestedSessionId)) ||
-          [...sessions.values()].find((s) => s.status === 'open' && s.sock?.user?.id);
-
-        if (!activeSession || activeSession.status !== 'open' || !activeSession.sock?.user?.id) {
-          return res.status(400).json({
-            error: 'Belum ada nomor WhatsApp yang terhubung. Pairing nomor terlebih dahulu.',
-          });
+        if (!videoFile?.buffer?.length) {
+          return res.status(400).json({ error: 'Unggah file video MP4/MOV terlebih dahulu.' });
         }
 
-        let targetJid = '';
-        if (targetMode === 'self') {
-          targetJid = `${normalizeUser(activeSession.sock.user.id)}@s.whatsapp.net`;
-        } else {
-          if (targetPhone.length < 10 || targetPhone.length > 16) {
-            return res.status(400).json({
-              error: 'Masukkan nomor WhatsApp tujuan yang valid (10–16 digit).',
-            });
-          }
-          targetJid = `${targetPhone}@s.whatsapp.net`;
+        const targetMode = String(req.body?.targetMode || 'preview').trim();
+        const targetPhone = formatIndonesianPhone(req.body?.phone);
+        const requestedSessionId = String(req.body?.sessionId || '').trim();
+
+        // Jika pengguna melampirkan audio kustom / rekaman suara, gabungkan ke video terlebih dahulu
+        let sourceVideoBuffer = videoFile.buffer;
+        if (customAudioFile?.buffer?.length) {
+          const ext = guessAudioExtFromMime(customAudioFile.mimetype, customAudioFile.originalname);
+          sourceVideoBuffer = await mergeVideoWithCustomAudio(
+            videoFile.buffer,
+            customAudioFile.buffer,
+            ext
+          );
         }
 
-        await sendVideoAsSoundSticker(activeSession.sock, targetJid, req.file.buffer, {
+        const converted = await convertVideoToSoundSticker(sourceVideoBuffer, {
           ffmpegPath,
           ffprobePath,
         });
-        sentTo = normalizeUser(targetJid);
-        pushLog(`🌐 [${activeSession.name}] Sound sticker dikirim dari Web ke ${sentTo}`);
-      } else {
-        pushLog('🌐 Sound sticker (24 FPS) dibuat di Web Studio');
+
+        let sentTo = null;
+        if (targetMode === 'self' || targetMode === 'phone') {
+          const activeSession =
+            (requestedSessionId && sessions.get(requestedSessionId)) ||
+            [...sessions.values()].find((s) => s.status === 'open' && s.sock?.user?.id);
+
+          if (!activeSession || activeSession.status !== 'open' || !activeSession.sock?.user?.id) {
+            return res.status(400).json({
+              error: 'Belum ada nomor WhatsApp yang terhubung. Pairing nomor terlebih dahulu.',
+            });
+          }
+
+          let targetJid = '';
+          if (targetMode === 'self') {
+            targetJid = `${normalizeUser(activeSession.sock.user.id)}@s.whatsapp.net`;
+          } else {
+            if (targetPhone.length < 10 || targetPhone.length > 16) {
+              return res.status(400).json({
+                error: 'Masukkan nomor WhatsApp tujuan yang valid (10–16 digit).',
+              });
+            }
+            targetJid = `${targetPhone}@s.whatsapp.net`;
+          }
+
+          await sendVideoAsSoundSticker(activeSession.sock, targetJid, sourceVideoBuffer, {
+            ffmpegPath,
+            ffprobePath,
+          });
+          sentTo = normalizeUser(targetJid);
+          pushLog(
+            `🌐 [${activeSession.name}] Sound sticker${customAudioFile ? ' (suara kustom)' : ''} dikirim ke ${sentTo}`
+          );
+        } else {
+          pushLog(`🌐 Sound sticker${customAudioFile ? ' (suara kustom)' : ''} dibuat di Web Studio`);
+        }
+
+        const archived = await archiveCreatedSticker({
+          stickerBuffer: converted.sticker,
+          audioBuffer: converted.audio,
+          seconds: converted.seconds,
+          source: customAudioFile
+            ? sentTo
+              ? `Kustom → ${sentTo}`
+              : 'Web Kustom'
+            : sentTo
+              ? `Web → ${sentTo}`
+              : 'Web',
+          name: videoFile.originalname?.replace(/\.[^.]+$/, '') || undefined,
+        });
+
+        res.json({
+          ok: true,
+          sentTo,
+          sticker: archived,
+        });
+      } catch (err) {
+        res.status(400).json({ error: err?.message || 'Gagal mengonversi video.' });
       }
-
-      const archived = await archiveCreatedSticker({
-        stickerBuffer: converted.sticker,
-        audioBuffer: converted.audio,
-        seconds: converted.seconds,
-        source: sentTo ? `Web → ${sentTo}` : 'Web',
-        name: req.file.originalname?.replace(/\.[^.]+$/, '') || undefined,
-      });
-
-      res.json({
-        ok: true,
-        sentTo,
-        sticker: archived,
-      });
-    } catch (err) {
-      res.status(400).json({ error: err?.message || 'Gagal mengonversi video.' });
     }
-  });
+  );
 
   app.use((err, _req, res, _next) => {
     if (err instanceof multer.MulterError) {

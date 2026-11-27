@@ -12,6 +12,11 @@ const els = {
   sessionsGrid: document.getElementById('sessions-grid'),
   convertForm: document.getElementById('convert-form'),
   videoInput: document.getElementById('video-input'),
+  customAudioInput: document.getElementById('custom-audio-input'),
+  recordBtn: document.getElementById('record-btn'),
+  recordStatus: document.getElementById('record-status'),
+  clearRecordBtn: document.getElementById('clear-record-btn'),
+  recordPreview: document.getElementById('record-preview'),
   targetMode: document.getElementById('target-mode'),
   senderGroup: document.getElementById('sender-group'),
   senderSession: document.getElementById('sender-session'),
@@ -34,6 +39,11 @@ const els = {
 
 let toastTimer = null;
 let pendingConfirmAction = null;
+let recordedBlob = null;
+let mediaRecorder = null;
+let recordChunks = [];
+let recordTimer = null;
+let recordSeconds = 0;
 
 function showToast(message, type = 'success') {
   clearTimeout(toastTimer);
@@ -495,6 +505,75 @@ async function fetchGallery() {
   }
 }
 
+/* --- Perekam Suara Sendiri (Mikrofon) --- */
+function resetRecording() {
+  recordedBlob = null;
+  els.recordPreview.hidden = true;
+  els.recordPreview.removeAttribute('src');
+  els.clearRecordBtn.hidden = true;
+  els.recordStatus.textContent = 'Pakai suara asli video';
+  els.recordBtn.textContent = '🎙️ Rekam Suara Sendiri';
+}
+
+els.clearRecordBtn.addEventListener('click', resetRecording);
+
+els.customAudioInput.addEventListener('change', () => {
+  if (els.customAudioInput.files?.[0]) {
+    resetRecording();
+    els.recordStatus.textContent = `Audio: ${els.customAudioInput.files[0].name}`;
+  } else {
+    els.recordStatus.textContent = 'Pakai suara asli video';
+  }
+});
+
+els.recordBtn.addEventListener('click', async () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
+
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+    showToast('Browser tidak mendukung rekaman mikrofon (butuh HTTPS/localhost).', 'error');
+    return;
+  }
+
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+
+    mediaRecorder.addEventListener('dataavailable', (event) => {
+      if (event.data.size > 0) recordChunks.push(event.data);
+    });
+
+    mediaRecorder.addEventListener('stop', () => {
+      clearInterval(recordTimer);
+      stream.getTracks().forEach((track) => track.stop());
+      els.recordBtn.classList.remove('recording');
+      els.recordBtn.textContent = '🎙️ Rekam Ulang';
+
+      recordedBlob = new Blob(recordChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+      els.customAudioInput.value = '';
+      els.recordPreview.src = URL.createObjectURL(recordedBlob);
+      els.recordPreview.hidden = false;
+      els.clearRecordBtn.hidden = false;
+      els.recordStatus.textContent = `Rekaman siap (${recordSeconds} dtk)`;
+    });
+
+    mediaRecorder.start();
+    recordSeconds = 0;
+    els.recordBtn.classList.add('recording');
+    els.recordBtn.textContent = '⏹️ Berhenti';
+    els.recordStatus.textContent = 'Merekam... 0 dtk';
+    recordTimer = setInterval(() => {
+      recordSeconds += 1;
+      els.recordStatus.textContent = `Merekam... ${recordSeconds} dtk`;
+    }, 1000);
+  } catch (err) {
+    showToast(`Izin mikrofon gagal: ${err.message}`, 'error');
+  }
+});
+
 /* --- Form Konversi & Kirim Sound Sticker --- */
 els.targetMode.addEventListener('change', () => {
   const mode = els.targetMode.value;
@@ -513,6 +592,12 @@ els.convertForm.addEventListener('submit', async (e) => {
 
   const fd = new FormData();
   fd.append('video', file);
+  const customAudio = els.customAudioInput.files?.[0];
+  if (customAudio) {
+    fd.append('audio', customAudio);
+  } else if (recordedBlob) {
+    fd.append('audio', recordedBlob, 'rekaman-suara.webm');
+  }
   fd.append('targetMode', els.targetMode.value);
   if (els.targetMode.value !== 'preview' && els.senderSession.value) {
     fd.append('sessionId', els.senderSession.value);
@@ -522,7 +607,8 @@ els.convertForm.addEventListener('submit', async (e) => {
   }
 
   els.convertBtn.disabled = true;
-  els.convertBtn.textContent = 'Memproses 24 FPS...';
+  els.convertBtn.textContent =
+    customAudio || recordedBlob ? 'Menggabungkan Suara & Membuat Stiker...' : 'Memproses 24 FPS...';
 
   try {
     const res = await fetch('/api/sound-sticker', { method: 'POST', body: fd });
@@ -530,14 +616,15 @@ els.convertForm.addEventListener('submit', async (e) => {
     if (!res.ok) throw new Error(body.error || 'Gagal mengonversi video.');
 
     els.convertForm.reset();
+    resetRecording();
     els.senderGroup.hidden = true;
     els.phoneGroup.hidden = true;
     await fetchGallery();
 
     showToast(
       body.sentTo
-        ? `✅ Sound sticker (24 FPS) berhasil dikirim ke ${body.sentTo} & masuk galeri!`
-        : '✅ Sound sticker (24 FPS) berhasil dibuat & masuk galeri!'
+        ? `✅ Sound sticker berhasil dikirim ke ${body.sentTo} & masuk galeri!`
+        : '✅ Sound sticker berhasil dibuat & masuk galeri!'
     );
   } catch (err) {
     showToast(err.message, 'error');

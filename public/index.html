@@ -132,7 +132,7 @@
 
           <form id="convert-form" class="form-stack" novalidate>
             <div class="field">
-              <label for="video-input">File Video Bersuara (MP4 / MOV)</label>
+              <label for="video-input">File Video (MP4 / MOV)</label>
               <span id="video-hint" class="hint">Maksimal 20 MB, otomatis dipotong maks. 15 detik pertama dengan animasi 24 FPS.</span>
               <input
                 type="file"
@@ -142,6 +142,26 @@
                 required
                 aria-describedby="video-hint"
               >
+            </div>
+
+            <div class="field">
+              <label for="custom-audio-input">🎵 Ganti Suara Sendiri (Opsional)</label>
+              <span id="custom-audio-hint" class="hint">Kosongkan untuk pakai suara asli video, atau unggah MP3/WAV/M4A/OGG maupun rekam suara sendiri lewat mikrofon.</span>
+              <input
+                type="file"
+                id="custom-audio-input"
+                name="audio"
+                accept="audio/*,.mp3,.wav,.m4a,.ogg,.opus,.aac"
+                aria-describedby="custom-audio-hint"
+              >
+              <div class="recorder-bar">
+                <button type="button" id="record-btn" class="btn btn-outline btn-sm">
+                  🎙️ Rekam Suara Sendiri
+                </button>
+                <span id="record-status" class="muted">Pakai suara asli video</span>
+                <button type="button" id="clear-record-btn" class="btn btn-ghost" hidden>Hapus Rekaman</button>
+              </div>
+              <audio id="record-preview" controls hidden></audio>
             </div>
 
             <div class="field">
@@ -213,6 +233,10 @@
             <div class="cmd-card">
               <code>.Sticker</code>
               <p>Kirim atau reply video MP4/MOV bersuara → otomatis dikonversi menjadi <strong>Sound Sticker</strong> (wajib ada audio). Untuk akun sendiri aktif di <em>self-chat</em>.</p>
+            </div>
+            <div class="cmd-card">
+              <code>.gantisuara</code>
+              <p>Kirim atau reply video dengan <code>.gantisuara</code>, lalu kirim <strong>Voice Note / file audio</strong> sendiri sebagai suara penggantinya.</p>
             </div>
           </div>
         </div>
