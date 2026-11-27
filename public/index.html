@@ -234,6 +234,16 @@
             </div>
 
             <div class="field">
+              <label for="greenscreen-mode">🟩 Hapus Green Screen</label>
+              <span id="gs-hint" class="hint">Otomatis mendeteksi latar hijau chroma (green screen) dan mengubahnya menjadi transparan tanpa mengubah video biasa.</span>
+              <select id="greenscreen-mode" name="greenScreenMode" class="select-input" aria-describedby="gs-hint">
+                <option value="auto" selected>Otomatis (Deteksi Green Screen)</option>
+                <option value="force">Paksa Hapus Green Screen</option>
+                <option value="off">Nonaktif (Biarkan Background Asli)</option>
+              </select>
+            </div>
+
+            <div class="field">
               <label for="target-mode">Tujuan Hasil</label>
               <span id="target-hint" class="hint">Pratinjau di web saja, atau langsung kirim sebagai Sound Sticker ke WhatsApp.</span>
               <select id="target-mode" name="targetMode" class="select-input" aria-describedby="target-hint">
@@ -314,6 +324,10 @@
             <div class="cmd-card">
               <code>.pinsticker &lt;link&gt;</code> <span class="muted">atau <code>.pin</code></span>
               <p>Ekstrak video/gambar/GIF dari <strong>link Pinterest</strong> (<code>pin.it</code> / <code>pinterest.com</code>) menjadi Sound Sticker atau Sticker animasi/statis.</p>
+            </div>
+            <div class="cmd-card">
+              <code>.greenscreen</code> <span class="muted">atau <code>.gs</code></span>
+              <p><strong>Paksa hapus background green screen</strong> pada video, gambar, atau link TikTok/Pinterest menjadi stiker transparan. (<code>.Sticker</code>, <code>.tt</code>, <code>.pin</code> juga sudah otomatis mendeteksi green screen).</p>
             </div>
           </div>
         </div>

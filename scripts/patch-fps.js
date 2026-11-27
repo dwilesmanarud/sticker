@@ -68,8 +68,12 @@ const SMOOTH_LOOP = `    let sticker;
         ? [[20, 55], [18, 48], [15, 45], [12, 40], [10, 35], [8, 28]]
         : [[16, 50], [15, 45], [12, 40], [10, 35], [8, 30], [6, 24]];
     const chunkSec = 1.5;
+    const gsHex = typeof options.greenScreenColor === 'string' && /^0x[0-9a-fA-F]{6}$/.test(options.greenScreenColor)
+      ? options.greenScreenColor
+      : (options.removeGreenScreen ? '0x00FF00' : null);
+    const gsFilter = gsHex ? \`chromakey=\${gsHex}:0.16:0.08,despill=type=green,\` : '';
     for (const [fps, quality] of presets) {
-      const filter = \`fps=\${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000\`;
+      const filter = \`fps=\${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,\${gsFilter}format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000\`;
       if (selectedDuration <= chunkSec + 0.2) {
         await run(ffmpeg, [...common, '-map', '0:v:0', '-an', '-vf', filter, '-c:v', 'libwebp_anim', '-preset', 'default', '-q:v', String(quality),
           '-loop', '0', '-compression_level', '4', '-y', webpPath], timeoutMs);
@@ -174,9 +178,9 @@ try {
     changed = true;
   }
 
-  // 7. Ganti loop WebP dengan chunked keyframe 1.5s (15-24 FPS mulus, tajam, 0% garis-garis, <= 500 KiB)
+  // 7. Ganti loop WebP dengan chunked keyframe 1.5s + dukungan hapus green screen (chromakey + despill)
   const loopRegex = /    let sticker;\r?\n[\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
-  if (loopRegex.test(src) && !src.includes('stitchWebpChunks(partBufs')) {
+  if (loopRegex.test(src) && !src.includes('despill=type=green')) {
     src = src.replace(loopRegex, SMOOTH_LOOP);
     changed = true;
   }

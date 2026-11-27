@@ -756,14 +756,101 @@ function stitchWebpChunks(webpBufs, width = 512, height = 512) {
 }
 
 /**
+ * Mendeteksi apakah pinggiran video/gambar merupakan background green screen (chroma key hijau).
+ * Mengambil 1 frame mini 32x32 RGB lalu mengecek 124 pixel tepi; jika >= 65% hijau chroma,
+ * mengembalikan warna hex rata-rata yang tepat (misal '0x04F212') agar chromakey sangat presisi.
+ */
+async function detectGreenScreenColor(buffer, { isImage = false, startSeconds = 0 } = {}) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-gs-det-'));
+  const inPath = path.join(dir, isImage ? 'in.img' : 'in.mp4');
+  try {
+    await fs.writeFile(inPath, buffer);
+    const args = ['-loglevel', 'error'];
+    if (!isImage && startSeconds > 0) args.push('-ss', String(startSeconds + 0.15));
+    args.push('-i', inPath, '-frames:v', '1', '-vf', 'scale=32:32:flags=fast_bilinear', '-f', 'rawvideo', '-pix_fmt', 'rgb24', 'pipe:1');
+
+    const raw = await new Promise((resolve, reject) => {
+      execFile(
+        ffmpegPath,
+        args,
+        { windowsHide: true, timeout: 10_000, encoding: 'buffer', maxBuffer: 1024 * 1024 },
+        (err, stdout) => (err ? reject(err) : resolve(stdout))
+      );
+    });
+
+    if (!raw || raw.length < 32 * 32 * 3) return null;
+    let totalBorder = 0;
+    let greenCount = 0;
+    let rSum = 0;
+    let gSum = 0;
+    let bSum = 0;
+
+    for (let y = 0; y < 32; y++) {
+      for (let x = 0; x < 32; x++) {
+        if (x > 0 && x < 31 && y > 0 && y < 31) continue;
+        totalBorder++;
+        const idx = (y * 32 + x) * 3;
+        const r = raw[idx];
+        const g = raw[idx + 1];
+        const b = raw[idx + 2];
+        if (g >= 115 && g - r >= 42 && g - b >= 42) {
+          greenCount++;
+          rSum += r;
+          gSum += g;
+          bSum += b;
+        }
+      }
+    }
+
+    if (totalBorder > 0 && greenCount / totalBorder >= 0.65) {
+      const avgR = Math.round(rSum / greenCount);
+      const avgG = Math.round(gSum / greenCount);
+      const avgB = Math.round(bSum / greenCount);
+      const hex =
+        '0x' +
+        [avgR, avgG, avgB].map((v) => Math.max(0, Math.min(255, v)).toString(16).padStart(2, '0')).join('');
+      return hex;
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+async function resolveGreenScreenOption(buffer, mode = 'auto', opts = {}) {
+  const m = String(mode || 'auto').toLowerCase();
+  if (m === 'off' || m === 'false' || m === '0') {
+    return { greenScreenColor: null, removed: false };
+  }
+  const detected = await detectGreenScreenColor(buffer, opts);
+  if (m === 'force' || m === 'true' || m === '1') {
+    return { greenScreenColor: detected || '0x00FF00', removed: true };
+  }
+  // mode === 'auto'
+  return detected
+    ? { greenScreenColor: detected, removed: true }
+    : { greenScreenColor: null, removed: false };
+}
+
+/**
  * Mengonversi gambar statis, GIF, atau video tanpa suara menjadi stiker WebP 512x512 (<= 500 KiB).
  */
-async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = false, startSeconds = 0 } = {}) {
+async function convertMediaToWebpSticker(
+  buffer,
+  { isAnimated = false, isGif = false, startSeconds = 0, greenScreenColor = null } = {}
+) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-webp-stk-'));
   const ext = isGif ? '.gif' : isAnimated ? '.mp4' : '.img';
   const inPath = path.join(dir, `in${ext}`);
   const outPath = path.join(dir, 'sticker.webp');
   const maxBytes = 500 * 1024;
+  const gsHex =
+    typeof greenScreenColor === 'string' && /^0x[0-9a-fA-F]{6}$/.test(greenScreenColor)
+      ? greenScreenColor
+      : null;
+  const gsFilter = gsHex ? `chromakey=${gsHex}:0.16:0.08,despill=type=green,` : '';
 
   try {
     await fs.writeFile(inPath, buffer);
@@ -779,7 +866,7 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
             '-i',
             inPath,
             '-vf',
-            'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000',
+            `scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,${gsFilter}format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`,
             '-c:v',
             'libwebp',
             '-q:v',
@@ -826,7 +913,7 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
         [6, 24],
       ];
       for (const [fps, quality] of presets) {
-        const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
+        const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,${gsFilter}format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
         const partBufs = [];
         let estBytes = 40;
         let overflow = false;
@@ -899,7 +986,7 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
       const [fps, quality] = presets[pi];
       const fDir = path.join(dir, `f_${pi}`);
       await fs.mkdir(fDir, { recursive: true });
-      const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
+      const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,${gsFilter}format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
       const args = ['-y', '-loglevel', 'error'];
       if (startSeconds > 0 && !isGif) args.push('-ss', String(startSeconds));
       args.push(
@@ -1166,6 +1253,7 @@ function printStartupBanner() {
   console.log('   • .gantisuara - Ubah video jadi sound sticker dengan suara sendiri');
   console.log('   • .ttsticker  - Ekstrak video dari link TikTok jadi sound sticker');
   console.log('   • .pinsticker - Ekstrak video/gambar dari link Pinterest jadi sticker');
+  console.log('   • .greenscreen- Paksa hapus background green screen jadi stiker transparan');
   console.log('========================================================\n');
 }
 
@@ -1177,7 +1265,8 @@ function buildMenuText() {
     '*Daftar Fitur & Perintah:*',
     '• `.menu` — Menampilkan menu & daftar fitur bot',
     '• `.ping` — Mengecek apakah bot sedang aktif (`pong`)',
-    '• `.Sticker` — Mengubah video bersuara menjadi *Sound Sticker*',
+    '• `.Sticker` — Mengubah video bersuara menjadi *Sound Sticker* (otomatis hapus green screen jika terdeteksi)',
+    '• `.greenscreen` / `.gs` — *Paksa hapus green screen* pada video/gambar atau link TikTok/Pinterest jadi stiker transparan',
     '• `.gantisuara` — Mengganti suara video dengan *Voice Note / audio sendiri* lalu jadi Sound Sticker',
     '• `.ttsticker <link>` — Mengubah video dari *link TikTok* langsung menjadi Sound Sticker',
     '• `.pinsticker <link>` — Mengubah video/gambar dari *link Pinterest* menjadi Sticker / Sound Sticker',
@@ -1540,14 +1629,21 @@ async function connectSession(sessionId) {
 
           try {
             const tt = await downloadTikTokVideo(ttUrl);
+            const gs = await resolveGreenScreenOption(tt.buffer, 'auto', { startSeconds });
             await sendVideoAsSoundSticker(sock, jid, tt.buffer, {
               quoted: msg,
               startSeconds,
+              greenScreenColor: gs.greenScreenColor,
               ffmpegPath,
               ffprobePath,
             });
-            pushLog(`✅ [${rec.name}] Sound sticker TikTok terkirim ke ${normalizeUser(jid)}`);
-            convertVideoToSoundSticker(tt.buffer, { startSeconds, ffmpegPath, ffprobePath })
+            pushLog(`✅ [${rec.name}] Sound sticker TikTok${gs.removed ? ' (Green Screen dihapus)' : ''} terkirim ke ${normalizeUser(jid)}`);
+            convertVideoToSoundSticker(tt.buffer, {
+              startSeconds,
+              greenScreenColor: gs.greenScreenColor,
+              ffmpegPath,
+              ffprobePath,
+            })
               .then((conv) =>
                 archiveCreatedSticker({
                   stickerBuffer: conv.sticker,
@@ -1602,16 +1698,26 @@ async function connectSession(sessionId) {
 
           try {
             const pin = await downloadPinterestMedia(pinUrl);
+            const gs = await resolveGreenScreenOption(pin.buffer, 'auto', {
+              isImage: pin.kind !== 'video',
+              startSeconds,
+            });
             if (pin.kind === 'video') {
               try {
                 await sendVideoAsSoundSticker(sock, jid, pin.buffer, {
                   quoted: msg,
                   startSeconds,
+                  greenScreenColor: gs.greenScreenColor,
                   ffmpegPath,
                   ffprobePath,
                 });
-                pushLog(`✅ [${rec.name}] Sound sticker Pinterest terkirim ke ${normalizeUser(jid)}`);
-                convertVideoToSoundSticker(pin.buffer, { startSeconds, ffmpegPath, ffprobePath })
+                pushLog(`✅ [${rec.name}] Sound sticker Pinterest${gs.removed ? ' (Green Screen dihapus)' : ''} terkirim ke ${normalizeUser(jid)}`);
+                convertVideoToSoundSticker(pin.buffer, {
+                  startSeconds,
+                  greenScreenColor: gs.greenScreenColor,
+                  ffmpegPath,
+                  ffprobePath,
+                })
                   .then((conv) =>
                     archiveCreatedSticker({
                       stickerBuffer: conv.sticker,
@@ -1628,9 +1734,10 @@ async function connectSession(sessionId) {
                   const conv = await convertMediaToWebpSticker(pin.buffer, {
                     isAnimated: true,
                     startSeconds,
+                    greenScreenColor: gs.greenScreenColor,
                   });
                   await sock.sendMessage(jid, { sticker: conv.sticker }, { quoted: msg });
-                  pushLog(`✅ [${rec.name}] Stiker animasi Pinterest (tanpa suara) terkirim ke ${normalizeUser(jid)}`);
+                  pushLog(`✅ [${rec.name}] Stiker animasi Pinterest${gs.removed ? ' (Green Screen dihapus)' : ''} terkirim ke ${normalizeUser(jid)}`);
                   archiveCreatedSticker({
                     stickerBuffer: conv.sticker,
                     audioBuffer: null,
@@ -1646,9 +1753,10 @@ async function connectSession(sessionId) {
               const conv = await convertMediaToWebpSticker(pin.buffer, {
                 isAnimated: pin.isGif,
                 isGif: pin.isGif,
+                greenScreenColor: gs.greenScreenColor,
               });
               await sock.sendMessage(jid, { sticker: conv.sticker }, { quoted: msg });
-              pushLog(`✅ [${rec.name}] Stiker gambar Pinterest terkirim ke ${normalizeUser(jid)}`);
+              pushLog(`✅ [${rec.name}] Stiker gambar Pinterest${gs.removed ? ' (Green Screen dihapus)' : ''} terkirim ke ${normalizeUser(jid)}`);
               archiveCreatedSticker({
                 stickerBuffer: conv.sticker,
                 audioBuffer: null,
@@ -1750,19 +1858,175 @@ async function connectSession(sessionId) {
           continue;
         }
 
+        if (cmd === '.greenscreen' || cmd === '.gs') {
+          await sock.sendMessage(
+            jid,
+            { text: '🟩 Menghapus background green screen & membuat sticker transparan...' },
+            { quoted: msg }
+          );
+          pushLog(`🟩 [${rec.name}] Memproses ${cmd} dari ${normalizeUser(jid)}...`);
+          try {
+            const unwrappedGs = unwrapWaMessage(msg.message);
+            const quotedMsg = unwrappedGs?.extendedTextMessage?.contextInfo?.quotedMessage;
+            const quotedText = extractText(quotedMsg);
+            const ttUrl = extractTikTokUrl(text) || extractTikTokUrl(quotedText);
+            const pinUrl = extractPinterestUrl(text) || extractPinterestUrl(quotedText);
+
+            if (ttUrl) {
+              const tt = await downloadTikTokVideo(ttUrl);
+              const gs = await resolveGreenScreenOption(tt.buffer, 'force');
+              await sendVideoAsSoundSticker(sock, jid, tt.buffer, {
+                quoted: msg,
+                greenScreenColor: gs.greenScreenColor,
+                ffmpegPath,
+                ffprobePath,
+              });
+              pushLog(`✅ [${rec.name}] Sound sticker TikTok (Green Screen) terkirim ke ${normalizeUser(jid)}`);
+              convertVideoToSoundSticker(tt.buffer, {
+                greenScreenColor: gs.greenScreenColor,
+                ffmpegPath,
+                ffprobePath,
+              })
+                .then((conv) =>
+                  archiveCreatedSticker({
+                    stickerBuffer: conv.sticker,
+                    audioBuffer: conv.audio,
+                    seconds: conv.seconds,
+                    source: 'Green Screen TikTok',
+                    name: tt.title,
+                  })
+                )
+                .catch(() => {});
+            } else if (pinUrl) {
+              const pin = await downloadPinterestMedia(pinUrl);
+              const gs = await resolveGreenScreenOption(pin.buffer, 'force', {
+                isImage: pin.kind !== 'video',
+              });
+              if (pin.kind === 'video') {
+                try {
+                  await sendVideoAsSoundSticker(sock, jid, pin.buffer, {
+                    quoted: msg,
+                    greenScreenColor: gs.greenScreenColor,
+                    ffmpegPath,
+                    ffprobePath,
+                  });
+                } catch (soundErr) {
+                  if (soundErr?.code === 'NO_AUDIO' || soundErr?.code === 'SILENT_AUDIO') {
+                    const conv = await convertMediaToWebpSticker(pin.buffer, {
+                      isAnimated: true,
+                      greenScreenColor: gs.greenScreenColor,
+                    });
+                    await sock.sendMessage(jid, { sticker: conv.sticker }, { quoted: msg });
+                  } else {
+                    throw soundErr;
+                  }
+                }
+              } else {
+                const conv = await convertMediaToWebpSticker(pin.buffer, {
+                  isAnimated: pin.isGif,
+                  isGif: pin.isGif,
+                  greenScreenColor: gs.greenScreenColor,
+                });
+                await sock.sendMessage(jid, { sticker: conv.sticker }, { quoted: msg });
+              }
+              pushLog(`✅ [${rec.name}] Stiker Pinterest (Green Screen) terkirim ke ${normalizeUser(jid)}`);
+            } else {
+              const imgNode = unwrappedGs?.imageMessage
+                ? { key: msg.key, message: unwrappedGs }
+                : unwrapWaMessage(quotedMsg)?.imageMessage
+                  ? { key: msg.key, message: unwrapWaMessage(quotedMsg) }
+                  : null;
+
+              if (imgNode) {
+                const imgBuf = await downloadMediaMessage(
+                  imgNode,
+                  'buffer',
+                  {},
+                  { logger, reuploadRequest: sock.updateMediaMessage }
+                );
+                const gs = await resolveGreenScreenOption(imgBuf, 'force', { isImage: true });
+                const conv = await convertMediaToWebpSticker(imgBuf, {
+                  isAnimated: false,
+                  greenScreenColor: gs.greenScreenColor,
+                });
+                await sock.sendMessage(jid, { sticker: conv.sticker }, { quoted: msg });
+                pushLog(`✅ [${rec.name}] Stiker gambar (Green Screen) terkirim ke ${normalizeUser(jid)}`);
+                archiveCreatedSticker({
+                  stickerBuffer: conv.sticker,
+                  audioBuffer: null,
+                  seconds: 0,
+                  source: 'Green Screen WA',
+                  name: `Stiker GS ${new Date().toLocaleTimeString('id-ID', { hour12: false })}`,
+                }).catch(() => {});
+              } else {
+                const videoBuffer = await downloadVideoForSoundSticker(msg);
+                const gs = await resolveGreenScreenOption(videoBuffer, 'force');
+                try {
+                  await sendVideoAsSoundSticker(sock, jid, videoBuffer, {
+                    quoted: msg,
+                    greenScreenColor: gs.greenScreenColor,
+                    ffmpegPath,
+                    ffprobePath,
+                  });
+                  convertVideoToSoundSticker(videoBuffer, {
+                    greenScreenColor: gs.greenScreenColor,
+                    ffmpegPath,
+                    ffprobePath,
+                  })
+                    .then((conv) =>
+                      archiveCreatedSticker({
+                        stickerBuffer: conv.sticker,
+                        audioBuffer: conv.audio,
+                        seconds: conv.seconds,
+                        source: 'Green Screen WA',
+                        name: `Stiker GS ${new Date().toLocaleTimeString('id-ID', { hour12: false })}`,
+                      })
+                    )
+                    .catch(() => {});
+                } catch (soundErr) {
+                  if (soundErr?.code === 'NO_AUDIO' || soundErr?.code === 'SILENT_AUDIO') {
+                    const conv = await convertMediaToWebpSticker(videoBuffer, {
+                      isAnimated: true,
+                      greenScreenColor: gs.greenScreenColor,
+                    });
+                    await sock.sendMessage(jid, { sticker: conv.sticker }, { quoted: msg });
+                  } else {
+                    throw soundErr;
+                  }
+                }
+                pushLog(`✅ [${rec.name}] Stiker video (Green Screen) terkirim ke ${normalizeUser(jid)}`);
+              }
+            }
+          } catch (err) {
+            pushLog(`❌ [${rec.name}] ${cmd} gagal: ${err?.message || err}`);
+            await sock.sendMessage(
+              jid,
+              { text: `❌ Gagal hapus green screen: ${err?.message || err}` },
+              { quoted: msg }
+            );
+          }
+          continue;
+        }
+
         if (cmd === '.sticker') {
           await sock.sendMessage(jid, { text: 'Sedang membuat sticker...' }, { quoted: msg });
           pushLog(`🎬 [${rec.name}] Memproses .Sticker dari ${normalizeUser(jid)}...`);
           try {
             const videoBuffer = await downloadVideoForSoundSticker(msg);
+            const gs = await resolveGreenScreenOption(videoBuffer, 'auto');
             await sendVideoAsSoundSticker(sock, jid, videoBuffer, {
               quoted: msg,
+              greenScreenColor: gs.greenScreenColor,
               ffmpegPath,
               ffprobePath,
             });
-            pushLog(`✅ [${rec.name}] Sound sticker (24 FPS) terkirim ke ${normalizeUser(jid)}`);
+            pushLog(`✅ [${rec.name}] Sound sticker${gs.removed ? ' (Green Screen dihapus otomatis)' : ''} terkirim ke ${normalizeUser(jid)}`);
             // Arsipkan ke galeri "Hasil Stiker yang Telah Dibuat" di latar belakang agar balasan WA tetap cepat
-            convertVideoToSoundSticker(videoBuffer, { ffmpegPath, ffprobePath })
+            convertVideoToSoundSticker(videoBuffer, {
+              greenScreenColor: gs.greenScreenColor,
+              ffmpegPath,
+              ffprobePath,
+            })
               .then((conv) =>
                 archiveCreatedSticker({
                   stickerBuffer: conv.sticker,
@@ -1984,10 +2248,13 @@ function startWebApp() {
       const targetMode = String(req.body?.targetMode || 'preview').trim();
       const targetPhone = formatIndonesianPhone(req.body?.phone);
       const requestedSessionId = String(req.body?.sessionId || '').trim();
+      const greenScreenMode = String(req.body?.greenScreenMode || 'auto').trim();
 
       const tt = await downloadTikTokVideo(ttUrl);
+      const gs = await resolveGreenScreenOption(tt.buffer, greenScreenMode, { startSeconds });
       const converted = await convertVideoToSoundSticker(tt.buffer, {
         startSeconds,
+        greenScreenColor: gs.greenScreenColor,
         ffmpegPath,
         ffprobePath,
       });
@@ -2018,13 +2285,14 @@ function startWebApp() {
 
         await sendVideoAsSoundSticker(activeSession.sock, targetJid, tt.buffer, {
           startSeconds,
+          greenScreenColor: gs.greenScreenColor,
           ffmpegPath,
           ffprobePath,
         });
         sentTo = normalizeUser(targetJid);
-        pushLog(`🎵 [${activeSession.name}] Sound sticker TikTok dikirim dari Web ke ${sentTo}`);
+        pushLog(`🎵 [${activeSession.name}] Sound sticker TikTok${gs.removed ? ' (Green Screen dihapus)' : ''} dikirim dari Web ke ${sentTo}`);
       } else {
-        pushLog(`🎵 Sound sticker TikTok dibuat di Web Studio (${tt.title})`);
+        pushLog(`🎵 Sound sticker TikTok${gs.removed ? ' (Green Screen dihapus)' : ''} dibuat di Web Studio (${tt.title})`);
       }
 
       const archived = await archiveCreatedSticker({
@@ -2038,6 +2306,7 @@ function startWebApp() {
       res.json({
         ok: true,
         sentTo,
+        greenScreenRemoved: gs.removed,
         sticker: archived,
       });
     } catch (err) {
@@ -2061,8 +2330,13 @@ function startWebApp() {
       const targetMode = String(req.body?.targetMode || 'preview').trim();
       const targetPhone = formatIndonesianPhone(req.body?.phone);
       const requestedSessionId = String(req.body?.sessionId || '').trim();
+      const greenScreenMode = String(req.body?.greenScreenMode || 'auto').trim();
 
       const pin = await downloadPinterestMedia(pinUrl);
+      const gs = await resolveGreenScreenOption(pin.buffer, greenScreenMode, {
+        isImage: pin.kind !== 'video',
+        startSeconds,
+      });
       let stickerBuffer = null;
       let audioBuffer = null;
       let seconds = 0;
@@ -2072,6 +2346,7 @@ function startWebApp() {
         try {
           const conv = await convertVideoToSoundSticker(pin.buffer, {
             startSeconds,
+            greenScreenColor: gs.greenScreenColor,
             ffmpegPath,
             ffprobePath,
           });
@@ -2084,6 +2359,7 @@ function startWebApp() {
             const conv = await convertMediaToWebpSticker(pin.buffer, {
               isAnimated: true,
               startSeconds,
+              greenScreenColor: gs.greenScreenColor,
             });
             stickerBuffer = conv.sticker;
           } else {
@@ -2094,6 +2370,7 @@ function startWebApp() {
         const conv = await convertMediaToWebpSticker(pin.buffer, {
           isAnimated: pin.isGif,
           isGif: pin.isGif,
+          greenScreenColor: gs.greenScreenColor,
         });
         stickerBuffer = conv.sticker;
       }
@@ -2125,6 +2402,7 @@ function startWebApp() {
         if (isSoundSticker) {
           await sendVideoAsSoundSticker(activeSession.sock, targetJid, pin.buffer, {
             startSeconds,
+            greenScreenColor: gs.greenScreenColor,
             ffmpegPath,
             ffprobePath,
           });
@@ -2133,9 +2411,9 @@ function startWebApp() {
         }
 
         sentTo = normalizeUser(targetJid);
-        pushLog(`📌 [${activeSession.name}] Stiker Pinterest dikirim dari Web ke ${sentTo}`);
+        pushLog(`📌 [${activeSession.name}] Stiker Pinterest${gs.removed ? ' (Green Screen dihapus)' : ''} dikirim dari Web ke ${sentTo}`);
       } else {
-        pushLog(`📌 Stiker Pinterest dibuat di Web Studio (${pin.title})`);
+        pushLog(`📌 Stiker Pinterest${gs.removed ? ' (Green Screen dihapus)' : ''} dibuat di Web Studio (${pin.title})`);
       }
 
       const archived = await archiveCreatedSticker({
@@ -2150,6 +2428,7 @@ function startWebApp() {
         ok: true,
         sentTo,
         isSoundSticker,
+        greenScreenRemoved: gs.removed,
         sticker: archived,
       });
     } catch (err) {
@@ -2176,6 +2455,7 @@ function startWebApp() {
         const targetMode = String(req.body?.targetMode || 'preview').trim();
         const targetPhone = formatIndonesianPhone(req.body?.phone);
         const requestedSessionId = String(req.body?.sessionId || '').trim();
+        const greenScreenMode = String(req.body?.greenScreenMode || 'auto').trim();
 
         // Jika pengguna melampirkan audio kustom / rekaman suara, gabungkan ke video terlebih dahulu
         let sourceVideoBuffer = videoFile.buffer;
@@ -2188,7 +2468,9 @@ function startWebApp() {
           );
         }
 
+        const gs = await resolveGreenScreenOption(sourceVideoBuffer, greenScreenMode);
         const converted = await convertVideoToSoundSticker(sourceVideoBuffer, {
+          greenScreenColor: gs.greenScreenColor,
           ffmpegPath,
           ffprobePath,
         });
@@ -2218,15 +2500,18 @@ function startWebApp() {
           }
 
           await sendVideoAsSoundSticker(activeSession.sock, targetJid, sourceVideoBuffer, {
+            greenScreenColor: gs.greenScreenColor,
             ffmpegPath,
             ffprobePath,
           });
           sentTo = normalizeUser(targetJid);
           pushLog(
-            `🌐 [${activeSession.name}] Sound sticker${customAudioFile ? ' (suara kustom)' : ''} dikirim ke ${sentTo}`
+            `🌐 [${activeSession.name}] Sound sticker${customAudioFile ? ' (suara kustom)' : ''}${gs.removed ? ' (Green Screen dihapus)' : ''} dikirim ke ${sentTo}`
           );
         } else {
-          pushLog(`🌐 Sound sticker${customAudioFile ? ' (suara kustom)' : ''} dibuat di Web Studio`);
+          pushLog(
+            `🌐 Sound sticker${customAudioFile ? ' (suara kustom)' : ''}${gs.removed ? ' (Green Screen dihapus)' : ''} dibuat di Web Studio`
+          );
         }
 
         const archived = await archiveCreatedSticker({
@@ -2246,6 +2531,7 @@ function startWebApp() {
         res.json({
           ok: true,
           sentTo,
+          greenScreenRemoved: gs.removed,
           sticker: archived,
         });
       } catch (err) {

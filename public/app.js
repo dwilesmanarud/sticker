@@ -25,6 +25,7 @@ const els = {
   recordStatus: document.getElementById('record-status'),
   clearRecordBtn: document.getElementById('clear-record-btn'),
   recordPreview: document.getElementById('record-preview'),
+  greenScreenMode: document.getElementById('greenscreen-mode'),
   targetMode: document.getElementById('target-mode'),
   senderGroup: document.getElementById('sender-group'),
   senderSession: document.getElementById('sender-session'),
@@ -643,6 +644,7 @@ els.convertForm.addEventListener('submit', async (e) => {
       const payload = {
         url,
         startSeconds: Number(els.tiktokStartInput.value || 0) || 0,
+        greenScreenMode: els.greenScreenMode?.value || 'auto',
         targetMode: els.targetMode.value,
       };
       if (els.targetMode.value !== 'preview' && els.senderSession.value) {
@@ -692,6 +694,7 @@ els.convertForm.addEventListener('submit', async (e) => {
       const payload = {
         url,
         startSeconds: Number(els.pinterestStartInput.value || 0) || 0,
+        greenScreenMode: els.greenScreenMode?.value || 'auto',
         targetMode: els.targetMode.value,
       };
       if (els.targetMode.value !== 'preview' && els.senderSession.value) {
@@ -741,6 +744,7 @@ els.convertForm.addEventListener('submit', async (e) => {
   } else if (recordedBlob) {
     fd.append('audio', recordedBlob, 'rekaman-suara.webm');
   }
+  fd.append('greenScreenMode', els.greenScreenMode?.value || 'auto');
   fd.append('targetMode', els.targetMode.value);
   if (els.targetMode.value !== 'preview' && els.senderSession.value) {
     fd.append('sessionId', els.senderSession.value);
