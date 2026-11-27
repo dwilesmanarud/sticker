@@ -100,6 +100,86 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'silent' });
 // Sesi sementara 2 langkah untuk perintah .gantisuara di WhatsApp (berlaku 2 menit)
 const pendingCustomAudio = new Map();
 
+const TIKTOK_URL_REGEX = /https?:\/\/(?:www\.|m\.|vm\.|vt\.)?tiktok\.com\/[^\s]+/i;
+
+function extractTikTokUrl(text) {
+  const match = String(text || '').match(TIKTOK_URL_REGEX);
+  return match ? match[0] : null;
+}
+
+/**
+ * Mengunduh video TikTok publik tanpa watermark (MP4) via TikWM API.
+ * Memvalidasi host tiktok.com dan membatasi ukuran maksimal 20 MB.
+ */
+async function downloadTikTokVideo(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('Format link TikTok tidak valid.');
+  }
+
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    !/(^|\.)tiktok\.com$/i.test(parsed.hostname)
+  ) {
+    throw new Error('Link harus berasal dari domain tiktok.com (contoh: vt.tiktok.com atau www.tiktok.com).');
+  }
+
+  const apiRes = await fetch('https://www.tikwm.com/api/', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+      'User-Agent': 'Mozilla/5.0',
+    },
+    body: new URLSearchParams({ url: parsed.toString(), hd: '0' }),
+    signal: AbortSignal.timeout(20_000),
+  });
+
+  if (!apiRes.ok) {
+    throw new Error(`Layanan downloader TikTok gagal merespons (HTTP ${apiRes.status}).`);
+  }
+
+  const json = await apiRes.json();
+  if (json?.code !== 0 || !json?.data) {
+    throw new Error(json?.msg || 'Video TikTok tidak ditemukan atau akun bersifat privat.');
+  }
+
+  const data = json.data;
+  if (Array.isArray(data.images) && data.images.length > 0 && !data.play) {
+    throw new Error('Link TikTok ini berupa slide foto, bukan video.');
+  }
+
+  const videoUrl = data.play || data.wmplay;
+  if (!videoUrl) {
+    throw new Error('Tautan video MP4 TikTok tidak tersedia.');
+  }
+
+  const mediaRes = await fetch(videoUrl, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (!mediaRes.ok) {
+    throw new Error(`Gagal mengunduh file video TikTok (HTTP ${mediaRes.status}).`);
+  }
+
+  const buf = Buffer.from(await mediaRes.arrayBuffer());
+  if (!buf.length) {
+    throw new Error('File video TikTok yang diunduh kosong.');
+  }
+  if (buf.length > 20 * 1024 * 1024) {
+    throw new Error('Ukuran video TikTok melebihi batas 20 MB.');
+  }
+
+  const cleanTitle = String(data.title || '').replace(/\s+/g, ' ').trim().slice(0, 45);
+  return {
+    buffer: buf,
+    title: cleanTitle || `TikTok ${data.id || ''}`.trim(),
+    author: data.author?.unique_id || 'tiktok',
+  };
+}
+
 /**
  * Menggabungkan video (MP4/MOV) dengan trek audio kustom (MP3/WAV/M4A/OGG/WebM/VN)
  * menjadi buffer MP4 baru agar bisa langsung diproses oleh sendVideoAsSoundSticker.
@@ -323,6 +403,7 @@ function printStartupBanner() {
   console.log('   • .ping       - Cek status bot (balas pong)');
   console.log('   • .Sticker    - Ubah video bersuara jadi sound sticker');
   console.log('   • .gantisuara - Ubah video jadi sound sticker dengan suara sendiri');
+  console.log('   • .ttsticker  - Ekstrak video dari link TikTok jadi sound sticker');
   console.log('========================================================\n');
 }
 
@@ -336,6 +417,7 @@ function buildMenuText() {
     '• `.ping` — Mengecek apakah bot sedang aktif (`pong`)',
     '• `.Sticker` — Mengubah video bersuara menjadi *Sound Sticker*',
     '• `.gantisuara` — Mengganti suara video dengan *Voice Note / audio sendiri* lalu jadi Sound Sticker',
+    '• `.ttsticker <link>` — Mengubah video dari *link TikTok* langsung menjadi Sound Sticker',
     '',
     '*Cara Pakai `.Sticker`:*',
     '1. Kirim video MP4/MOV yang ada suaranya dengan caption `.Sticker`, atau',
@@ -344,6 +426,9 @@ function buildMenuText() {
     '*Cara Pakai `.gantisuara`:*',
     '1. Kirim/reply video dengan `.gantisuara`.',
     '2. Lalu kirim *Voice Note* atau *file audio* (MP3/WAV/M4A) sebagai suara penggantinya.',
+    '',
+    '*Cara Pakai `.ttsticker`:*',
+    '• Kirim `.ttsticker https://vt.tiktok.com/...` (bisa tambah detik mulai, misal `.ttsticker <link> 5`).',
     '',
     '_Catatan: Untuk akun sendiri, perintah aktif di self-chat._',
   ].join('\n');
@@ -657,6 +742,69 @@ async function connectSession(sessionId) {
           continue;
         }
 
+        if (cmd === '.ttsticker' || cmd === '.tt' || cmd === '.tiktok') {
+          const unwrappedForTt = unwrapWaMessage(msg.message);
+          const quotedText = extractText(
+            unwrappedForTt?.extendedTextMessage?.contextInfo?.quotedMessage
+          );
+          const ttUrl = extractTikTokUrl(text) || extractTikTokUrl(quotedText);
+          if (!ttUrl) {
+            await sock.sendMessage(
+              jid,
+              {
+                text: '🔗 Kirim link TikTok setelah perintah, contoh:\n`.ttsticker https://vt.tiktok.com/...`\n(Opsional tambah detik mulai: `.ttsticker <link> 5`)',
+              },
+              { quoted: msg }
+            );
+            continue;
+          }
+
+          // Cek apakah ada angka detik mulai di argumen setelah link
+          const afterUrl = text.replace(ttUrl, '').replace(/^\S+\s*/, '').trim();
+          const parsedStart = Number(afterUrl);
+          const startSeconds =
+            Number.isFinite(parsedStart) && parsedStart >= 0 && parsedStart <= 3600
+              ? parsedStart
+              : 0;
+
+          await sock.sendMessage(
+            jid,
+            { text: '⏳ Mengunduh video TikTok & membuat Sound Sticker...' },
+            { quoted: msg }
+          );
+          pushLog(`🎵 [${rec.name}] Memproses .ttsticker dari ${normalizeUser(jid)}...`);
+
+          try {
+            const tt = await downloadTikTokVideo(ttUrl);
+            await sendVideoAsSoundSticker(sock, jid, tt.buffer, {
+              quoted: msg,
+              startSeconds,
+              ffmpegPath,
+              ffprobePath,
+            });
+            pushLog(`✅ [${rec.name}] Sound sticker TikTok terkirim ke ${normalizeUser(jid)}`);
+            convertVideoToSoundSticker(tt.buffer, { startSeconds, ffmpegPath, ffprobePath })
+              .then((conv) =>
+                archiveCreatedSticker({
+                  stickerBuffer: conv.sticker,
+                  audioBuffer: conv.audio,
+                  seconds: conv.seconds,
+                  source: 'TikTok WA',
+                  name: tt.title,
+                })
+              )
+              .catch(() => {});
+          } catch (err) {
+            pushLog(`❌ [${rec.name}] .ttsticker gagal: ${err?.message || err}`);
+            await sock.sendMessage(
+              jid,
+              { text: `❌ Gagal ekstrak TikTok: ${err?.message || err}` },
+              { quoted: msg }
+            );
+          }
+          continue;
+        }
+
         if (cmd === '.gantisuara') {
           try {
             const videoBuffer = await downloadVideoForSoundSticker(msg);
@@ -955,6 +1103,83 @@ function startWebApp() {
     const ok = await removeCreatedSticker(String(req.params.id || ''));
     if (!ok) return res.status(404).json({ error: 'Stiker tidak ditemukan.' });
     res.json({ deleted: true });
+  });
+
+  // Ekstrak video dari link TikTok -> Sound Sticker (24 FPS, maks. 15 detik) & opsional kirim ke WhatsApp
+  app.post('/api/tiktok-sticker', async (req, res) => {
+    try {
+      const rawUrl = String(req.body?.url || '').trim();
+      const ttUrl = extractTikTokUrl(rawUrl) || rawUrl;
+      if (!ttUrl) {
+        return res.status(400).json({ error: 'Masukkan link video TikTok terlebih dahulu.' });
+      }
+
+      const rawStart = Number(req.body?.startSeconds ?? 0);
+      const startSeconds =
+        Number.isFinite(rawStart) && rawStart >= 0 && rawStart <= 3600 ? rawStart : 0;
+
+      const targetMode = String(req.body?.targetMode || 'preview').trim();
+      const targetPhone = formatIndonesianPhone(req.body?.phone);
+      const requestedSessionId = String(req.body?.sessionId || '').trim();
+
+      const tt = await downloadTikTokVideo(ttUrl);
+      const converted = await convertVideoToSoundSticker(tt.buffer, {
+        startSeconds,
+        ffmpegPath,
+        ffprobePath,
+      });
+
+      let sentTo = null;
+      if (targetMode === 'self' || targetMode === 'phone') {
+        const activeSession =
+          (requestedSessionId && sessions.get(requestedSessionId)) ||
+          [...sessions.values()].find((s) => s.status === 'open' && s.sock?.user?.id);
+
+        if (!activeSession || activeSession.status !== 'open' || !activeSession.sock?.user?.id) {
+          return res.status(400).json({
+            error: 'Belum ada nomor WhatsApp yang terhubung. Pairing nomor terlebih dahulu.',
+          });
+        }
+
+        let targetJid = '';
+        if (targetMode === 'self') {
+          targetJid = `${normalizeUser(activeSession.sock.user.id)}@s.whatsapp.net`;
+        } else {
+          if (targetPhone.length < 10 || targetPhone.length > 16) {
+            return res.status(400).json({
+              error: 'Masukkan nomor WhatsApp tujuan yang valid (10–16 digit).',
+            });
+          }
+          targetJid = `${targetPhone}@s.whatsapp.net`;
+        }
+
+        await sendVideoAsSoundSticker(activeSession.sock, targetJid, tt.buffer, {
+          startSeconds,
+          ffmpegPath,
+          ffprobePath,
+        });
+        sentTo = normalizeUser(targetJid);
+        pushLog(`🎵 [${activeSession.name}] Sound sticker TikTok dikirim dari Web ke ${sentTo}`);
+      } else {
+        pushLog(`🎵 Sound sticker TikTok dibuat di Web Studio (${tt.title})`);
+      }
+
+      const archived = await archiveCreatedSticker({
+        stickerBuffer: converted.sticker,
+        audioBuffer: converted.audio,
+        seconds: converted.seconds,
+        source: sentTo ? `TikTok → ${sentTo}` : 'TikTok Web',
+        name: tt.title,
+      });
+
+      res.json({
+        ok: true,
+        sentTo,
+        sticker: archived,
+      });
+    } catch (err) {
+      res.status(400).json({ error: err?.message || 'Gagal memproses link TikTok.' });
+    }
   });
 
   // Konversi video -> sound sticker (mendukung opsional ganti suara dengan audio upload / rekaman mikrofon)

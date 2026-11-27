@@ -11,6 +11,11 @@ const els = {
   addSessionBtn: document.getElementById('add-session-btn'),
   sessionsGrid: document.getElementById('sessions-grid'),
   convertForm: document.getElementById('convert-form'),
+  sourceTabs: document.querySelectorAll('[data-source-tab]'),
+  uploadSourceGroup: document.getElementById('upload-source-group'),
+  tiktokSourceGroup: document.getElementById('tiktok-source-group'),
+  tiktokUrlInput: document.getElementById('tiktok-url-input'),
+  tiktokStartInput: document.getElementById('tiktok-start-input'),
   videoInput: document.getElementById('video-input'),
   customAudioInput: document.getElementById('custom-audio-input'),
   recordBtn: document.getElementById('record-btn'),
@@ -39,6 +44,7 @@ const els = {
 
 let toastTimer = null;
 let pendingConfirmAction = null;
+let activeSourceTab = 'upload'; // 'upload' | 'tiktok'
 let recordedBlob = null;
 let mediaRecorder = null;
 let recordChunks = [];
@@ -574,6 +580,24 @@ els.recordBtn.addEventListener('click', async () => {
   }
 });
 
+/* --- Switch Tab Sumber Video (Upload / Link TikTok) --- */
+els.sourceTabs.forEach((tab) => {
+  tab.addEventListener('click', () => {
+    activeSourceTab = tab.dataset.sourceTab;
+    els.sourceTabs.forEach((t) => {
+      const active = t === tab;
+      t.classList.toggle('active', active);
+      t.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    const isTikTok = activeSourceTab === 'tiktok';
+    els.uploadSourceGroup.hidden = isTikTok;
+    els.tiktokSourceGroup.hidden = !isTikTok;
+    els.convertBtn.textContent = isTikTok
+      ? 'Ekstrak TikTok & Buat Stiker'
+      : 'Konversi Video (24 FPS)';
+  });
+});
+
 /* --- Form Konversi & Kirim Sound Sticker --- */
 els.targetMode.addEventListener('change', () => {
   const mode = els.targetMode.value;
@@ -584,6 +608,56 @@ els.targetMode.addEventListener('change', () => {
 
 els.convertForm.addEventListener('submit', async (e) => {
   e.preventDefault();
+
+  if (activeSourceTab === 'tiktok') {
+    const url = els.tiktokUrlInput.value.trim();
+    if (!url) {
+      showToast('Tempel link video TikTok terlebih dahulu.', 'error');
+      els.tiktokUrlInput.focus();
+      return;
+    }
+
+    els.convertBtn.disabled = true;
+    els.convertBtn.textContent = 'Mengunduh TikTok & Membuat Stiker...';
+
+    try {
+      const payload = {
+        url,
+        startSeconds: Number(els.tiktokStartInput.value || 0) || 0,
+        targetMode: els.targetMode.value,
+      };
+      if (els.targetMode.value !== 'preview' && els.senderSession.value) {
+        payload.sessionId = els.senderSession.value;
+      }
+      if (els.targetMode.value === 'phone') {
+        payload.phone = els.targetPhone.value.replace(/\D/g, '');
+      }
+
+      const res = await fetch('/api/tiktok-sticker', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Gagal mengekstrak link TikTok.');
+
+      els.tiktokUrlInput.value = '';
+      els.tiktokStartInput.value = '0';
+      await fetchGallery();
+      showToast(
+        body.sentTo
+          ? `🎵 Sound sticker TikTok berhasil dikirim ke ${body.sentTo}!`
+          : '🎵 Sound sticker TikTok berhasil dibuat & masuk galeri!'
+      );
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      els.convertBtn.disabled = false;
+      els.convertBtn.textContent = 'Ekstrak TikTok & Buat Stiker';
+    }
+    return;
+  }
+
   const file = els.videoInput.files?.[0];
   if (!file) {
     showToast('Pilih file video MP4/MOV terlebih dahulu.', 'error');

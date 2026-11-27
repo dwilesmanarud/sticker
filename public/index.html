@@ -126,42 +126,80 @@
       <div class="container studio-grid">
         <div class="card">
           <div class="card-header">
-            <h3>🎬 Buat Sound Sticker dari Video</h3>
+            <h3>🎬 Buat Sound Sticker</h3>
             <span class="badge">24 FPS · Maks. 15 Detik</span>
           </div>
 
+          <div class="mode-tabs" style="grid-template-columns:1fr 1fr" role="tablist" aria-label="Sumber video">
+            <button type="button" class="tab active" role="tab" aria-selected="true" data-source-tab="upload">
+              📁 Upload Video
+            </button>
+            <button type="button" class="tab" role="tab" aria-selected="false" data-source-tab="tiktok">
+              🔗 Link TikTok
+            </button>
+          </div>
+
           <form id="convert-form" class="form-stack" novalidate>
-            <div class="field">
-              <label for="video-input">File Video (MP4 / MOV)</label>
-              <span id="video-hint" class="hint">Maksimal 20 MB, otomatis dipotong maks. 15 detik pertama dengan animasi 24 FPS.</span>
-              <input
-                type="file"
-                id="video-input"
-                name="video"
-                accept="video/mp4,video/quicktime,.mp4,.mov"
-                required
-                aria-describedby="video-hint"
-              >
+            <div id="upload-source-group" class="form-stack">
+              <div class="field">
+                <label for="video-input">File Video (MP4 / MOV)</label>
+                <span id="video-hint" class="hint">Maksimal 20 MB, otomatis dipotong maks. 15 detik pertama dengan animasi 24 FPS.</span>
+                <input
+                  type="file"
+                  id="video-input"
+                  name="video"
+                  accept="video/mp4,video/quicktime,.mp4,.mov"
+                  aria-describedby="video-hint"
+                >
+              </div>
+
+              <div class="field">
+                <label for="custom-audio-input">🎵 Ganti Suara Sendiri (Opsional)</label>
+                <span id="custom-audio-hint" class="hint">Kosongkan untuk pakai suara asli video, atau unggah MP3/WAV/M4A/OGG maupun rekam suara sendiri lewat mikrofon.</span>
+                <input
+                  type="file"
+                  id="custom-audio-input"
+                  name="audio"
+                  accept="audio/*,.mp3,.wav,.m4a,.ogg,.opus,.aac"
+                  aria-describedby="custom-audio-hint"
+                >
+                <div class="recorder-bar">
+                  <button type="button" id="record-btn" class="btn btn-outline btn-sm">
+                    🎙️ Rekam Suara Sendiri
+                  </button>
+                  <span id="record-status" class="muted">Pakai suara asli video</span>
+                  <button type="button" id="clear-record-btn" class="btn btn-ghost" hidden>Hapus Rekaman</button>
+                </div>
+                <audio id="record-preview" controls hidden></audio>
+              </div>
             </div>
 
-            <div class="field">
-              <label for="custom-audio-input">🎵 Ganti Suara Sendiri (Opsional)</label>
-              <span id="custom-audio-hint" class="hint">Kosongkan untuk pakai suara asli video, atau unggah MP3/WAV/M4A/OGG maupun rekam suara sendiri lewat mikrofon.</span>
-              <input
-                type="file"
-                id="custom-audio-input"
-                name="audio"
-                accept="audio/*,.mp3,.wav,.m4a,.ogg,.opus,.aac"
-                aria-describedby="custom-audio-hint"
-              >
-              <div class="recorder-bar">
-                <button type="button" id="record-btn" class="btn btn-outline btn-sm">
-                  🎙️ Rekam Suara Sendiri
-                </button>
-                <span id="record-status" class="muted">Pakai suara asli video</span>
-                <button type="button" id="clear-record-btn" class="btn btn-ghost" hidden>Hapus Rekaman</button>
+            <div id="tiktok-source-group" class="form-stack" hidden>
+              <div class="field">
+                <label for="tiktok-url-input">Link Video TikTok (Publik)</label>
+                <span id="tiktok-hint" class="hint">Tempel link TikTok, contoh: https://vt.tiktok.com/... atau https://www.tiktok.com/@user/video/...</span>
+                <input
+                  type="text"
+                  id="tiktok-url-input"
+                  name="tiktokUrl"
+                  placeholder="https://vt.tiktok.com/..."
+                  autocomplete="off"
+                  aria-describedby="tiktok-hint"
+                >
               </div>
-              <audio id="record-preview" controls hidden></audio>
+
+              <div class="field">
+                <label for="tiktok-start-input">Mulai dari Detik ke- (Opsional)</label>
+                <span id="tiktok-start-hint" class="hint">Isi 0 untuk mulai dari awal video, atau misal 5 untuk mulai dari detik ke-5.</span>
+                <input
+                  type="text"
+                  id="tiktok-start-input"
+                  name="startSeconds"
+                  value="0"
+                  placeholder="0"
+                  aria-describedby="tiktok-start-hint"
+                >
+              </div>
             </div>
 
             <div class="field">
@@ -237,6 +275,10 @@
             <div class="cmd-card">
               <code>.gantisuara</code>
               <p>Kirim atau reply video dengan <code>.gantisuara</code>, lalu kirim <strong>Voice Note / file audio</strong> sendiri sebagai suara penggantinya.</p>
+            </div>
+            <div class="cmd-card">
+              <code>.ttsticker &lt;link&gt;</code> <span class="muted">atau <code>.tt</code></span>
+              <p>Ekstrak video dari <strong>link TikTok</strong> langsung menjadi Sound Sticker (opsional tambah detik mulai, misal <code>.ttsticker &lt;link&gt; 5</code>).</p>
             </div>
           </div>
         </div>
