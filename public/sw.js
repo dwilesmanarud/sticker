@@ -1,4 +1,4 @@
-const CACHE_NAME = 'stiker-bersuara-v15';
+const CACHE_NAME = 'stiker-bersuara-v16';
 const APP_SHELL = [
   '/',
   '/index.html',

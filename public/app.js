@@ -16,6 +16,9 @@ const els = {
   tiktokSourceGroup: document.getElementById('tiktok-source-group'),
   tiktokUrlInput: document.getElementById('tiktok-url-input'),
   tiktokStartInput: document.getElementById('tiktok-start-input'),
+  pinterestSourceGroup: document.getElementById('pinterest-source-group'),
+  pinterestUrlInput: document.getElementById('pinterest-url-input'),
+  pinterestStartInput: document.getElementById('pinterest-start-input'),
   videoInput: document.getElementById('video-input'),
   customAudioInput: document.getElementById('custom-audio-input'),
   recordBtn: document.getElementById('record-btn'),
@@ -430,9 +433,12 @@ function renderGallery(stickers = []) {
     const nameEl = document.createElement('h4');
     nameEl.className = 'sticker-name';
     nameEl.textContent = item.name || item.id;
+    const hasAudio = Number(item.audioBytes || 0) > 0;
     const subEl = document.createElement('div');
     subEl.className = 'sticker-hash';
-    subEl.textContent = `${item.seconds} dtk · ${(item.stickerBytes / 1024).toFixed(0)} KB · ${formatDate(item.createdAt)}`;
+    subEl.textContent = hasAudio
+      ? `${item.seconds} dtk · ${(item.stickerBytes / 1024).toFixed(0)} KB · ${formatDate(item.createdAt)}`
+      : `Stiker · ${(item.stickerBytes / 1024).toFixed(0)} KB · ${formatDate(item.createdAt)}`;
     titleWrap.append(nameEl, subEl);
 
     const badge = document.createElement('span');
@@ -446,10 +452,13 @@ function renderGallery(stickers = []) {
     thumb.alt = item.name || 'Sound Sticker';
     thumb.src = `/api/created-stickers/${encodeURIComponent(item.id)}/webp`;
 
-    const audio = document.createElement('audio');
-    audio.controls = true;
-    audio.preload = 'none';
-    audio.src = `/api/created-stickers/${encodeURIComponent(item.id)}/ogg`;
+    let audio = null;
+    if (hasAudio) {
+      audio = document.createElement('audio');
+      audio.controls = true;
+      audio.preload = 'none';
+      audio.src = `/api/created-stickers/${encodeURIComponent(item.id)}/ogg`;
+    }
 
     const actions = document.createElement('div');
     actions.className = 'sticker-actions';
@@ -460,11 +469,16 @@ function renderGallery(stickers = []) {
     dlWebp.download = `${item.name || item.id}.webp`;
     dlWebp.textContent = '⬇️ .webp';
 
-    const dlOgg = document.createElement('a');
-    dlOgg.className = 'btn btn-ghost';
-    dlOgg.href = `/api/created-stickers/${encodeURIComponent(item.id)}/ogg`;
-    dlOgg.download = `${item.name || item.id}.ogg`;
-    dlOgg.textContent = '⬇️ .ogg';
+    actions.append(dlWebp);
+
+    if (hasAudio) {
+      const dlOgg = document.createElement('a');
+      dlOgg.className = 'btn btn-ghost';
+      dlOgg.href = `/api/created-stickers/${encodeURIComponent(item.id)}/ogg`;
+      dlOgg.download = `${item.name || item.id}.ogg`;
+      dlOgg.textContent = '⬇️ .ogg';
+      actions.append(dlOgg);
+    }
 
     const delBtn = document.createElement('button');
     delBtn.type = 'button';
@@ -491,8 +505,9 @@ function renderGallery(stickers = []) {
       });
     });
 
-    actions.append(dlWebp, dlOgg, delBtn);
-    card.append(top, thumb, audio, actions);
+    actions.append(delBtn);
+    if (audio) card.append(top, thumb, audio, actions);
+    else card.append(top, thumb, actions);
     frag.append(card);
   }
 
@@ -580,7 +595,7 @@ els.recordBtn.addEventListener('click', async () => {
   }
 });
 
-/* --- Switch Tab Sumber Video (Upload / Link TikTok) --- */
+/* --- Switch Tab Sumber Video (Upload / Link TikTok / Link Pinterest) --- */
 els.sourceTabs.forEach((tab) => {
   tab.addEventListener('click', () => {
     activeSourceTab = tab.dataset.sourceTab;
@@ -589,12 +604,16 @@ els.sourceTabs.forEach((tab) => {
       t.classList.toggle('active', active);
       t.setAttribute('aria-selected', active ? 'true' : 'false');
     });
-    const isTikTok = activeSourceTab === 'tiktok';
-    els.uploadSourceGroup.hidden = isTikTok;
-    els.tiktokSourceGroup.hidden = !isTikTok;
-    els.convertBtn.textContent = isTikTok
-      ? 'Ekstrak TikTok & Buat Stiker'
-      : 'Konversi Video (24 FPS)';
+    els.uploadSourceGroup.hidden = activeSourceTab !== 'upload';
+    els.tiktokSourceGroup.hidden = activeSourceTab !== 'tiktok';
+    els.pinterestSourceGroup.hidden = activeSourceTab !== 'pinterest';
+    if (activeSourceTab === 'tiktok') {
+      els.convertBtn.textContent = 'Ekstrak TikTok & Buat Stiker';
+    } else if (activeSourceTab === 'pinterest') {
+      els.convertBtn.textContent = 'Ekstrak Pinterest & Buat Stiker';
+    } else {
+      els.convertBtn.textContent = 'Konversi Video (24 FPS)';
+    }
   });
 });
 
@@ -654,6 +673,56 @@ els.convertForm.addEventListener('submit', async (e) => {
     } finally {
       els.convertBtn.disabled = false;
       els.convertBtn.textContent = 'Ekstrak TikTok & Buat Stiker';
+    }
+    return;
+  }
+
+  if (activeSourceTab === 'pinterest') {
+    const url = els.pinterestUrlInput.value.trim();
+    if (!url) {
+      showToast('Tempel link Pinterest terlebih dahulu.', 'error');
+      els.pinterestUrlInput.focus();
+      return;
+    }
+
+    els.convertBtn.disabled = true;
+    els.convertBtn.textContent = 'Mengunduh Pinterest & Membuat Stiker...';
+
+    try {
+      const payload = {
+        url,
+        startSeconds: Number(els.pinterestStartInput.value || 0) || 0,
+        targetMode: els.targetMode.value,
+      };
+      if (els.targetMode.value !== 'preview' && els.senderSession.value) {
+        payload.sessionId = els.senderSession.value;
+      }
+      if (els.targetMode.value === 'phone') {
+        payload.phone = els.targetPhone.value.replace(/\D/g, '');
+      }
+
+      const res = await fetch('/api/pinterest-sticker', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'Gagal mengekstrak link Pinterest.');
+
+      els.pinterestUrlInput.value = '';
+      els.pinterestStartInput.value = '0';
+      await fetchGallery();
+      const label = body.isSoundSticker ? 'Sound sticker Pinterest' : 'Stiker Pinterest';
+      showToast(
+        body.sentTo
+          ? `📌 ${label} berhasil dikirim ke ${body.sentTo}!`
+          : `📌 ${label} berhasil dibuat & masuk galeri!`
+      );
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      els.convertBtn.disabled = false;
+      els.convertBtn.textContent = 'Ekstrak Pinterest & Buat Stiker';
     }
     return;
   }

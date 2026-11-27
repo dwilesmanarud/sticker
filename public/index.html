@@ -130,12 +130,15 @@
             <span class="badge">24 FPS · Maks. 15 Detik</span>
           </div>
 
-          <div class="mode-tabs" style="grid-template-columns:1fr 1fr" role="tablist" aria-label="Sumber video">
+          <div class="mode-tabs" style="grid-template-columns:repeat(3,1fr)" role="tablist" aria-label="Sumber video">
             <button type="button" class="tab active" role="tab" aria-selected="true" data-source-tab="upload">
               📁 Upload Video
             </button>
             <button type="button" class="tab" role="tab" aria-selected="false" data-source-tab="tiktok">
               🔗 Link TikTok
+            </button>
+            <button type="button" class="tab" role="tab" aria-selected="false" data-source-tab="pinterest">
+              📌 Link Pinterest
             </button>
           </div>
 
@@ -198,6 +201,34 @@
                   value="0"
                   placeholder="0"
                   aria-describedby="tiktok-start-hint"
+                >
+              </div>
+            </div>
+
+            <div id="pinterest-source-group" class="form-stack" hidden>
+              <div class="field">
+                <label for="pinterest-url-input">Link Pin Pinterest (Video / Gambar / GIF)</label>
+                <span id="pinterest-hint" class="hint">Tempel link Pinterest, contoh: https://pin.it/... atau https://www.pinterest.com/pin/... (video bersuara otomatis jadi Sound Sticker).</span>
+                <input
+                  type="text"
+                  id="pinterest-url-input"
+                  name="pinterestUrl"
+                  placeholder="https://pin.it/..."
+                  autocomplete="off"
+                  aria-describedby="pinterest-hint"
+                >
+              </div>
+
+              <div class="field">
+                <label for="pinterest-start-input">Mulai dari Detik ke- (Khusus Video, Opsional)</label>
+                <span id="pinterest-start-hint" class="hint">Isi 0 untuk mulai dari awal video, atau misal 5 untuk mulai dari detik ke-5.</span>
+                <input
+                  type="text"
+                  id="pinterest-start-input"
+                  name="pinStartSeconds"
+                  value="0"
+                  placeholder="0"
+                  aria-describedby="pinterest-start-hint"
                 >
               </div>
             </div>
@@ -279,6 +310,10 @@
             <div class="cmd-card">
               <code>.ttsticker &lt;link&gt;</code> <span class="muted">atau <code>.tt</code></span>
               <p>Ekstrak video dari <strong>link TikTok</strong> langsung menjadi Sound Sticker (opsional tambah detik mulai, misal <code>.ttsticker &lt;link&gt; 5</code>).</p>
+            </div>
+            <div class="cmd-card">
+              <code>.pinsticker &lt;link&gt;</code> <span class="muted">atau <code>.pin</code></span>
+              <p>Ekstrak video/gambar/GIF dari <strong>link Pinterest</strong> (<code>pin.it</code> / <code>pinterest.com</code>) menjadi Sound Sticker atau Sticker animasi/statis.</p>
             </div>
           </div>
         </div>

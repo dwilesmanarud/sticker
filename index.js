@@ -180,6 +180,341 @@ async function downloadTikTokVideo(rawUrl) {
   };
 }
 
+function extractPinterestUrl(text = '') {
+  const match = String(text || '').match(
+    /https?:\/\/(?:pin\.it|[a-z0-9-]+\.pinterest\.[a-z.]+|pinterest\.[a-z.]+)\/[^\s<>"]+/i
+  );
+  return match ? match[0].replace(/[),.!?;]+$/, '') : null;
+}
+
+function findPinterestPinObject(node, targetId, depth = 0) {
+  if (!node || typeof node !== 'object' || depth > 8) return null;
+  if (targetId && node[targetId] && typeof node[targetId] === 'object' && (node[targetId].images || node[targetId].videos)) {
+    return node[targetId];
+  }
+  if ((node.videos?.video_list || node.story_pin_data?.pages || node.images?.orig?.url) && (!targetId || String(node.id || '') === String(targetId))) {
+    return node;
+  }
+  for (const val of Object.values(node)) {
+    if (val && typeof val === 'object') {
+      const found = findPinterestPinObject(val, targetId, depth + 1);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function pickPinterestVideoFromList(videoList) {
+  if (!videoList || typeof videoList !== 'object') return { mp4: null, m3u8: null };
+  const entries = Object.values(videoList).filter((v) => v && typeof v.url === 'string');
+  const mp4 =
+    videoList.V_720P?.url ||
+    videoList.V_480P?.url ||
+    videoList.V_EXP7?.url ||
+    entries.find((v) => /\.mp4(\?|$)/i.test(v.url))?.url ||
+    null;
+  const m3u8 =
+    videoList.V_HLSV4?.url ||
+    videoList.V_HLSV3_WEB?.url ||
+    entries.find((v) => /\.m3u8(\?|$)/i.test(v.url))?.url ||
+    null;
+  return { mp4, m3u8 };
+}
+
+async function downloadHlsToMp4Buffer(m3u8Url, maxSeconds = 20) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-pin-hls-'));
+  const outMp4 = path.join(dir, 'pin.mp4');
+  try {
+    await new Promise((resolve, reject) => {
+      execFile(
+        ffmpegPath,
+        [
+          '-y',
+          '-loglevel',
+          'error',
+          '-i',
+          m3u8Url,
+          '-t',
+          String(maxSeconds),
+          '-c:v',
+          'libx264',
+          '-preset',
+          'veryfast',
+          '-pix_fmt',
+          'yuv420p',
+          '-c:a',
+          'aac',
+          '-b:a',
+          '128k',
+          '-movflags',
+          '+faststart',
+          outMp4,
+        ],
+        { windowsHide: true, timeout: 60_000 },
+        (err, _stdout, stderr) => {
+          if (err) reject(new Error(`Gagal mengunduh stream video Pinterest: ${stderr?.slice(-200) || err.message}`));
+          else resolve();
+        }
+      );
+    });
+    const buf = await fs.readFile(outMp4);
+    if (!buf.length) throw new Error('Stream video Pinterest kosong.');
+    if (buf.length > 20 * 1024 * 1024) throw new Error('Ukuran video Pinterest melebihi 20 MB.');
+    return buf;
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Mengunduh media dari link Pinterest (pin.it / pinterest.com):
+ * mendukung Pin Video (MP4 / HLS .m3u8), GIF, dan Gambar (JPG/PNG/WebP).
+ */
+async function downloadPinterestMedia(rawUrl) {
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error('Format link Pinterest tidak valid.');
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    !(/^(?:pin\.it|(?:[a-z0-9-]+\.)*pinterest\.[a-z.]+)$/i.test(host))
+  ) {
+    throw new Error('Link harus berasal dari domain pin.it atau pinterest.com.');
+  }
+
+  const pageRes = await fetch(parsed.toString(), {
+    headers: {
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+      'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+    },
+    redirect: 'follow',
+    signal: AbortSignal.timeout(25_000),
+  });
+
+  if (!pageRes.ok) {
+    throw new Error(`Gagal membuka halaman Pinterest (HTTP ${pageRes.status}).`);
+  }
+
+  const finalUrl = pageRes.url || parsed.toString();
+  const pinIdMatch = finalUrl.match(/\/pin\/(\d+)/);
+  const pinId = pinIdMatch ? pinIdMatch[1] : null;
+  const html = await pageRes.text();
+
+  let title = '';
+  let mp4Url = null;
+  let m3u8Url = null;
+  let imageUrl = null;
+
+  // 1. Parse JSON __PWS_INITIAL_PROPS__ jika tersedia
+  const pwsMatch = html.match(/<script[^>]*id="__PWS_INITIAL_PROPS__"[^>]*>([\s\S]*?)<\/script>/i);
+  if (pwsMatch) {
+    try {
+      const props = JSON.parse(pwsMatch[1]);
+      const pinsMap = props?.initialReduxState?.pins || {};
+      const pin =
+        (pinId && pinsMap[pinId]) ||
+        Object.values(pinsMap)[0] ||
+        findPinterestPinObject(props, pinId);
+
+      if (pin) {
+        title = String(pin.title || pin.grid_title || pin.closeup_unified_description || '')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 45);
+
+        const directVid = pickPinterestVideoFromList(pin.videos?.video_list);
+        mp4Url = directVid.mp4;
+        m3u8Url = directVid.m3u8;
+
+        // Cek juga Idea Pin / Story Pin blocks
+        if (!mp4Url && !m3u8Url && Array.isArray(pin.story_pin_data?.pages)) {
+          for (const page of pin.story_pin_data.pages) {
+            for (const block of page?.blocks || []) {
+              const sv = pickPinterestVideoFromList(block?.video?.video_list);
+              if (sv.mp4) {
+                mp4Url = sv.mp4;
+                break;
+              }
+              if (sv.m3u8 && !m3u8Url) m3u8Url = sv.m3u8;
+            }
+            if (mp4Url) break;
+          }
+        }
+
+        imageUrl =
+          pin.images?.orig?.url ||
+          pin.images?.['736x']?.url ||
+          pin.images?.['564x']?.url ||
+          null;
+      }
+    } catch {
+      // Lanjut ke fallback regex HTML
+    }
+  }
+
+  // 2. Fallback regex langsung dari HTML halaman Pinterest
+  if (!mp4Url) {
+    const m = html.match(/https:\/\/v\d*\.pinimg\.com\/[^"'\s\\]+?\.mp4(?:\?[^"'\s\\]*)?/i);
+    if (m) mp4Url = m[0].replace(/\\u002F/g, '/');
+  }
+  if (!mp4Url && !m3u8Url) {
+    const m = html.match(/https:\/\/v\d*\.pinimg\.com\/[^"'\s\\]+?\.m3u8(?:\?[^"'\s\\]*)?/i);
+    if (m) m3u8Url = m[0].replace(/\\u002F/g, '/');
+  }
+  if (!imageUrl) {
+    const origMatch = html.match(
+      /https:\/\/i\.pinimg\.com\/originals\/[^"'\s\\]+?\.(?:gif|png|jpg|jpeg|webp)/i
+    );
+    const largeMatch = html.match(
+      /https:\/\/i\.pinimg\.com\/736x\/[^"'\s\\]+?\.(?:gif|png|jpg|jpeg|webp)/i
+    );
+    imageUrl = origMatch?.[0] || largeMatch?.[0] || null;
+  }
+
+  const cleanTitle = title || `Pinterest ${pinId || ''}`.trim();
+
+  // Prioritas 1: Video MP4 langsung
+  if (mp4Url) {
+    const mediaRes = await fetch(mp4Url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!mediaRes.ok) {
+      throw new Error(`Gagal mengunduh video Pinterest (HTTP ${mediaRes.status}).`);
+    }
+    const buf = Buffer.from(await mediaRes.arrayBuffer());
+    if (!buf.length) throw new Error('File video Pinterest kosong.');
+    if (buf.length > 20 * 1024 * 1024) throw new Error('Ukuran video Pinterest melebihi batas 20 MB.');
+    return { kind: 'video', buffer: buf, title: cleanTitle, isGif: false };
+  }
+
+  // Prioritas 2: Video HLS (.m3u8) -> konversi ke MP4 via FFmpeg
+  if (m3u8Url) {
+    const buf = await downloadHlsToMp4Buffer(m3u8Url, 20);
+    return { kind: 'video', buffer: buf, title: cleanTitle, isGif: false };
+  }
+
+  // Prioritas 3: Gambar / GIF Pinterest
+  if (imageUrl) {
+    const mediaRes = await fetch(imageUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (!mediaRes.ok) {
+      throw new Error(`Gagal mengunduh gambar Pinterest (HTTP ${mediaRes.status}).`);
+    }
+    const buf = Buffer.from(await mediaRes.arrayBuffer());
+    if (!buf.length) throw new Error('File gambar Pinterest kosong.');
+    const mime = (mediaRes.headers.get('content-type') || '').toLowerCase();
+    const isGif = mime.includes('gif') || /\.gif(\?|$)/i.test(imageUrl);
+    return { kind: 'image', buffer: buf, title: cleanTitle, isGif, mime };
+  }
+
+  throw new Error('Media video/gambar tidak ditemukan pada link Pinterest tersebut (pastikan pin bersifat publik).');
+}
+
+/**
+ * Mengonversi gambar statis, GIF, atau video tanpa suara menjadi stiker WebP 512x512 (<= 1024 KiB).
+ */
+async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = false, startSeconds = 0 } = {}) {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wa-webp-stk-'));
+  const ext = isGif ? '.gif' : isAnimated ? '.mp4' : '.img';
+  const inPath = path.join(dir, `in${ext}`);
+  const outPath = path.join(dir, 'sticker.webp');
+  const maxBytes = 1024 * 1024;
+
+  try {
+    await fs.writeFile(inPath, buffer);
+
+    if (!isAnimated && !isGif) {
+      await new Promise((resolve, reject) => {
+        execFile(
+          ffmpegPath,
+          [
+            '-y',
+            '-loglevel',
+            'error',
+            '-i',
+            inPath,
+            '-vf',
+            'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000',
+            '-c:v',
+            'libwebp',
+            '-q:v',
+            '85',
+            '-compression_level',
+            '6',
+            outPath,
+          ],
+          { windowsHide: true, timeout: 30_000 },
+          (err, _stdout, stderr) => {
+            if (err) reject(new Error(`Gagal membuat stiker gambar: ${stderr?.slice(-200) || err.message}`));
+            else resolve();
+          }
+        );
+      });
+      const webp = await fs.readFile(outPath);
+      return { sticker: webp, isAnimated: false };
+    }
+
+    // Video tanpa suara atau GIF animasi -> WebP animasi 512x512
+    const presets = [
+      [24, 72, 512],
+      [20, 55, 512],
+      [15, 45, 384],
+      [12, 36, 384],
+      [10, 30, 320],
+      [8, 22, 256],
+    ];
+    for (const [fps, quality, scaleSize] of presets) {
+      const denoise = scaleSize >= 512 ? 'hqdn3d=1.2:1.2:5:5' : 'hqdn3d=1.5:1.5:6:6';
+      const scaleChain =
+        scaleSize >= 512
+          ? 'scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,unsharp=3:3:0.3:3:3:0.0'
+          : `scale=${scaleSize}:${scaleSize}:force_original_aspect_ratio=decrease:flags=lanczos,scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos`;
+      const filter = `fps=${fps},${denoise},${scaleChain},format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
+      const args = ['-y', '-loglevel', 'error'];
+      if (startSeconds > 0 && !isGif) args.push('-ss', String(startSeconds));
+      args.push(
+        '-i',
+        inPath,
+        '-t',
+        '15',
+        '-an',
+        '-vf',
+        filter,
+        '-c:v',
+        'libwebp_anim',
+        '-q:v',
+        String(quality),
+        '-loop',
+        '0',
+        '-compression_level',
+        '5',
+        outPath
+      );
+      await new Promise((resolve, reject) => {
+        execFile(ffmpegPath, args, { windowsHide: true, timeout: 60_000 }, (err, _stdout, stderr) => {
+          if (err) reject(new Error(`Gagal membuat stiker animasi: ${stderr?.slice(-200) || err.message}`));
+          else resolve();
+        });
+      });
+      const st = await fs.stat(outPath);
+      if (st.size <= maxBytes) {
+        return { sticker: await fs.readFile(outPath), isAnimated: true };
+      }
+    }
+    throw new Error('Ukuran stiker animasi Pinterest melebihi batas 1024 KiB.');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 /**
  * Menggabungkan video (MP4/MOV) dengan trek audio kustom (MP3/WAV/M4A/OGG/WebM/VN)
  * menjadi buffer MP4 baru agar bisa langsung diproses oleh sendVideoAsSoundSticker.
@@ -309,12 +644,14 @@ function saveCreatedStickersFile() {
   return stickersWriteQueue;
 }
 
-async function archiveCreatedSticker({ stickerBuffer, audioBuffer, seconds, source, name }) {
+async function archiveCreatedSticker({ stickerBuffer, audioBuffer = null, seconds = 0, source, name }) {
   await fs.mkdir(STICKERS_DIR, { recursive: true });
   await fs.mkdir(SOUNDS_DIR, { recursive: true });
   const id = `stk_${Date.now().toString(36)}_${crypto.randomBytes(2).toString('hex')}`;
   await fs.writeFile(path.join(STICKERS_DIR, `${id}.webp`), stickerBuffer);
-  await fs.writeFile(path.join(SOUNDS_DIR, `${id}.ogg`), audioBuffer);
+  if (audioBuffer?.length) {
+    await fs.writeFile(path.join(SOUNDS_DIR, `${id}.ogg`), audioBuffer);
+  }
 
   const entry = {
     id,
@@ -322,7 +659,7 @@ async function archiveCreatedSticker({ stickerBuffer, audioBuffer, seconds, sour
     source: source || 'Web',
     seconds: seconds || 0,
     stickerBytes: stickerBuffer.length,
-    audioBytes: audioBuffer.length,
+    audioBytes: audioBuffer?.length || 0,
     createdAt: new Date().toISOString(),
   };
 
@@ -404,6 +741,7 @@ function printStartupBanner() {
   console.log('   • .Sticker    - Ubah video bersuara jadi sound sticker');
   console.log('   • .gantisuara - Ubah video jadi sound sticker dengan suara sendiri');
   console.log('   • .ttsticker  - Ekstrak video dari link TikTok jadi sound sticker');
+  console.log('   • .pinsticker - Ekstrak video/gambar dari link Pinterest jadi sticker');
   console.log('========================================================\n');
 }
 
@@ -418,6 +756,7 @@ function buildMenuText() {
     '• `.Sticker` — Mengubah video bersuara menjadi *Sound Sticker*',
     '• `.gantisuara` — Mengganti suara video dengan *Voice Note / audio sendiri* lalu jadi Sound Sticker',
     '• `.ttsticker <link>` — Mengubah video dari *link TikTok* langsung menjadi Sound Sticker',
+    '• `.pinsticker <link>` — Mengubah video/gambar dari *link Pinterest* menjadi Sticker / Sound Sticker',
     '',
     '*Cara Pakai `.Sticker`:*',
     '1. Kirim video MP4/MOV yang ada suaranya dengan caption `.Sticker`, atau',
@@ -427,8 +766,9 @@ function buildMenuText() {
     '1. Kirim/reply video dengan `.gantisuara`.',
     '2. Lalu kirim *Voice Note* atau *file audio* (MP3/WAV/M4A) sebagai suara penggantinya.',
     '',
-    '*Cara Pakai `.ttsticker`:*',
-    '• Kirim `.ttsticker https://vt.tiktok.com/...` (bisa tambah detik mulai, misal `.ttsticker <link> 5`).',
+    '*Cara Pakai `.ttsticker` & `.pinsticker`:*',
+    '• TikTok: `.ttsticker https://vt.tiktok.com/...` (opsional detik mulai: `.ttsticker <link> 5`).',
+    '• Pinterest: `.pinsticker https://pin.it/...` (video bersuara jadi Sound Sticker, video/gambar lain jadi Sticker).',
     '',
     '_Catatan: Untuk akun sendiri, perintah aktif di self-chat._',
   ].join('\n');
@@ -799,6 +1139,105 @@ async function connectSession(sessionId) {
             await sock.sendMessage(
               jid,
               { text: `❌ Gagal ekstrak TikTok: ${err?.message || err}` },
+              { quoted: msg }
+            );
+          }
+          continue;
+        }
+
+        if (cmd === '.pinsticker' || cmd === '.pin' || cmd === '.pinterest') {
+          const unwrappedForPin = unwrapWaMessage(msg.message);
+          const quotedText = extractText(
+            unwrappedForPin?.extendedTextMessage?.contextInfo?.quotedMessage
+          );
+          const pinUrl = extractPinterestUrl(text) || extractPinterestUrl(quotedText);
+          if (!pinUrl) {
+            await sock.sendMessage(
+              jid,
+              {
+                text: '📌 Kirim link Pinterest setelah perintah, contoh:\n`.pinsticker https://pin.it/...`\n(Opsional tambah detik mulai untuk video: `.pinsticker <link> 5`)',
+              },
+              { quoted: msg }
+            );
+            continue;
+          }
+
+          const afterUrl = text.replace(pinUrl, '').replace(/^\S+\s*/, '').trim();
+          const parsedStart = Number(afterUrl);
+          const startSeconds =
+            Number.isFinite(parsedStart) && parsedStart >= 0 && parsedStart <= 3600
+              ? parsedStart
+              : 0;
+
+          await sock.sendMessage(
+            jid,
+            { text: '⏳ Mengunduh media Pinterest & membuat Sticker...' },
+            { quoted: msg }
+          );
+          pushLog(`📌 [${rec.name}] Memproses .pinsticker dari ${normalizeUser(jid)}...`);
+
+          try {
+            const pin = await downloadPinterestMedia(pinUrl);
+            if (pin.kind === 'video') {
+              try {
+                await sendVideoAsSoundSticker(sock, jid, pin.buffer, {
+                  quoted: msg,
+                  startSeconds,
+                  ffmpegPath,
+                  ffprobePath,
+                });
+                pushLog(`✅ [${rec.name}] Sound sticker Pinterest terkirim ke ${normalizeUser(jid)}`);
+                convertVideoToSoundSticker(pin.buffer, { startSeconds, ffmpegPath, ffprobePath })
+                  .then((conv) =>
+                    archiveCreatedSticker({
+                      stickerBuffer: conv.sticker,
+                      audioBuffer: conv.audio,
+                      seconds: conv.seconds,
+                      source: 'Pinterest WA',
+                      name: pin.title,
+                    })
+                  )
+                  .catch(() => {});
+              } catch (soundErr) {
+                // Jika video Pinterest tidak memiliki audio, otomatis buat Stiker Animasi tanpa suara
+                if (soundErr?.code === 'NO_AUDIO' || soundErr?.code === 'SILENT_AUDIO') {
+                  const conv = await convertMediaToWebpSticker(pin.buffer, {
+                    isAnimated: true,
+                    startSeconds,
+                  });
+                  await sock.sendMessage(jid, { sticker: conv.sticker }, { quoted: msg });
+                  pushLog(`✅ [${rec.name}] Stiker animasi Pinterest (tanpa suara) terkirim ke ${normalizeUser(jid)}`);
+                  archiveCreatedSticker({
+                    stickerBuffer: conv.sticker,
+                    audioBuffer: null,
+                    seconds: 0,
+                    source: 'Pinterest WA',
+                    name: pin.title,
+                  }).catch(() => {});
+                } else {
+                  throw soundErr;
+                }
+              }
+            } else {
+              const conv = await convertMediaToWebpSticker(pin.buffer, {
+                isAnimated: pin.isGif,
+                isGif: pin.isGif,
+              });
+              await sock.sendMessage(jid, { sticker: conv.sticker }, { quoted: msg });
+              pushLog(`✅ [${rec.name}] Stiker gambar Pinterest terkirim ke ${normalizeUser(jid)}`);
+              archiveCreatedSticker({
+                stickerBuffer: conv.sticker,
+                audioBuffer: null,
+                seconds: 0,
+                source: 'Pinterest WA',
+                name: pin.title,
+              }).catch(() => {});
+            }
+          } catch (err) {
+            pushLog(`❌ [${rec.name}] .pinsticker gagal: ${err?.message || err}`);
+            await sock.sendMessage(
+              jid,
+              { text: `❌ Gagal ekstrak Pinterest: ${err?.message || err}` },
               { quoted: msg }
             );
           }
@@ -1179,6 +1618,118 @@ function startWebApp() {
       });
     } catch (err) {
       res.status(400).json({ error: err?.message || 'Gagal memproses link TikTok.' });
+    }
+  });
+
+  // Ekstrak video / gambar dari link Pinterest -> Sound Sticker / Sticker & opsional kirim ke WhatsApp
+  app.post('/api/pinterest-sticker', async (req, res) => {
+    try {
+      const rawUrl = String(req.body?.url || '').trim();
+      const pinUrl = extractPinterestUrl(rawUrl) || rawUrl;
+      if (!pinUrl) {
+        return res.status(400).json({ error: 'Masukkan link Pinterest terlebih dahulu.' });
+      }
+
+      const rawStart = Number(req.body?.startSeconds ?? 0);
+      const startSeconds =
+        Number.isFinite(rawStart) && rawStart >= 0 && rawStart <= 3600 ? rawStart : 0;
+
+      const targetMode = String(req.body?.targetMode || 'preview').trim();
+      const targetPhone = formatIndonesianPhone(req.body?.phone);
+      const requestedSessionId = String(req.body?.sessionId || '').trim();
+
+      const pin = await downloadPinterestMedia(pinUrl);
+      let stickerBuffer = null;
+      let audioBuffer = null;
+      let seconds = 0;
+      let isSoundSticker = false;
+
+      if (pin.kind === 'video') {
+        try {
+          const conv = await convertVideoToSoundSticker(pin.buffer, {
+            startSeconds,
+            ffmpegPath,
+            ffprobePath,
+          });
+          stickerBuffer = conv.sticker;
+          audioBuffer = conv.audio;
+          seconds = conv.seconds;
+          isSoundSticker = true;
+        } catch (soundErr) {
+          if (soundErr?.code === 'NO_AUDIO' || soundErr?.code === 'SILENT_AUDIO') {
+            const conv = await convertMediaToWebpSticker(pin.buffer, {
+              isAnimated: true,
+              startSeconds,
+            });
+            stickerBuffer = conv.sticker;
+          } else {
+            throw soundErr;
+          }
+        }
+      } else {
+        const conv = await convertMediaToWebpSticker(pin.buffer, {
+          isAnimated: pin.isGif,
+          isGif: pin.isGif,
+        });
+        stickerBuffer = conv.sticker;
+      }
+
+      let sentTo = null;
+      if (targetMode === 'self' || targetMode === 'phone') {
+        const activeSession =
+          (requestedSessionId && sessions.get(requestedSessionId)) ||
+          [...sessions.values()].find((s) => s.status === 'open' && s.sock?.user?.id);
+
+        if (!activeSession || activeSession.status !== 'open' || !activeSession.sock?.user?.id) {
+          return res.status(400).json({
+            error: 'Belum ada nomor WhatsApp yang terhubung. Pairing nomor terlebih dahulu.',
+          });
+        }
+
+        let targetJid = '';
+        if (targetMode === 'self') {
+          targetJid = `${normalizeUser(activeSession.sock.user.id)}@s.whatsapp.net`;
+        } else {
+          if (targetPhone.length < 10 || targetPhone.length > 16) {
+            return res.status(400).json({
+              error: 'Masukkan nomor WhatsApp tujuan yang valid (10–16 digit).',
+            });
+          }
+          targetJid = `${targetPhone}@s.whatsapp.net`;
+        }
+
+        if (isSoundSticker) {
+          await sendVideoAsSoundSticker(activeSession.sock, targetJid, pin.buffer, {
+            startSeconds,
+            ffmpegPath,
+            ffprobePath,
+          });
+        } else {
+          await activeSession.sock.sendMessage(targetJid, { sticker: stickerBuffer });
+        }
+
+        sentTo = normalizeUser(targetJid);
+        pushLog(`📌 [${activeSession.name}] Stiker Pinterest dikirim dari Web ke ${sentTo}`);
+      } else {
+        pushLog(`📌 Stiker Pinterest dibuat di Web Studio (${pin.title})`);
+      }
+
+      const archived = await archiveCreatedSticker({
+        stickerBuffer,
+        audioBuffer,
+        seconds,
+        source: sentTo ? `Pinterest → ${sentTo}` : 'Pinterest Web',
+        name: pin.title,
+      });
+
+      res.json({
+        ok: true,
+        sentTo,
+        isSoundSticker,
+        sticker: archived,
+      });
+    } catch (err) {
+      res.status(400).json({ error: err?.message || 'Gagal memproses link Pinterest.' });
     }
   });
 
