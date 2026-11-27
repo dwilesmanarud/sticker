@@ -707,6 +707,54 @@ function muxAnimatedWebp(frameBuffers, fps, width = 512, height = 512) {
   return Buffer.concat([riff, body]);
 }
 
+function extractAnmfChunks(buf) {
+  const chunks = [];
+  let hasAlpha = false;
+  if (buf.length < 20 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WEBP') {
+    return { chunks, hasAlpha };
+  }
+  let pos = 12;
+  while (pos + 8 <= buf.length) {
+    const tag = buf.toString('ascii', pos, pos + 4);
+    const size = buf.readUInt32LE(pos + 4);
+    const padded = size + (size % 2);
+    const end = pos + 8 + padded;
+    if (end > buf.length) break;
+    if (tag === 'VP8X' && (buf[pos + 8] & 0x10)) hasAlpha = true;
+    if (tag === 'ANMF') chunks.push(buf.subarray(pos, end));
+    pos = end;
+  }
+  return { chunks, hasAlpha };
+}
+
+function stitchWebpChunks(webpBufs, width = 512, height = 512) {
+  const allAnmf = [];
+  let hasAlpha = false;
+  for (const b of webpBufs) {
+    const { chunks, hasAlpha: ha } = extractAnmfChunks(b);
+    if (ha) hasAlpha = true;
+    allAnmf.push(...chunks);
+  }
+  const vp8x = Buffer.alloc(18);
+  vp8x.write('VP8X', 0, 4, 'ascii');
+  vp8x.writeUInt32LE(10, 4);
+  vp8x[8] = hasAlpha ? 0x12 : 0x02;
+  writeUInt24LE(vp8x, width - 1, 12);
+  writeUInt24LE(vp8x, height - 1, 15);
+
+  const anim = Buffer.alloc(14);
+  anim.write('ANIM', 0, 4, 'ascii');
+  anim.writeUInt32LE(6, 4);
+  anim.writeUInt32LE(0, 8);
+  anim.writeUInt16LE(0, 12);
+
+  const body = Buffer.concat([Buffer.from('WEBP', 'ascii'), vp8x, anim, ...allAnmf]);
+  const riff = Buffer.alloc(8);
+  riff.write('RIFF', 0, 4, 'ascii');
+  riff.writeUInt32LE(body.length, 4);
+  return Buffer.concat([riff, body]);
+}
+
 /**
  * Mengonversi gambar statis, GIF, atau video tanpa suara menjadi stiker WebP 512x512 (<= 500 KiB).
  */
@@ -751,7 +799,94 @@ async function convertMediaToWebpSticker(buffer, { isAnimated = false, isGif = f
       return { sticker: webp, isAnimated: false };
     }
 
-    // Video tanpa suara atau GIF animasi -> frame libwebp independen + RIFF muxer (bebas garis-garis, <= 500 KiB)
+    // Video tanpa suara -> chunked keyframe 1.5s (mulus 15-20 FPS, anti-striping, <= 500 KiB)
+    if (!isGif) {
+      let dur = 5;
+      try {
+        const probeJson = await new Promise((resolve, reject) => {
+          execFile(
+            ffprobePath,
+            ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', inPath],
+            { windowsHide: true, timeout: 15_000 },
+            (err, stdout) => (err ? reject(err) : resolve(JSON.parse(stdout || '{}')))
+          );
+        });
+        const d = Number(probeJson?.format?.duration);
+        if (Number.isFinite(d) && d > 0.2) dur = Math.min(15, Math.max(0.5, d - startSeconds));
+      } catch {
+        // Pakai fallback durasi 5 detik
+      }
+      const chunkSec = 1.5;
+      const presets = [
+        [18, 50],
+        [15, 45],
+        [12, 40],
+        [10, 35],
+        [8, 30],
+        [6, 24],
+      ];
+      for (const [fps, quality] of presets) {
+        const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
+        const partBufs = [];
+        let estBytes = 40;
+        let overflow = false;
+        for (let off = 0, idx = 0; off < dur - 0.04; off += chunkSec, idx++) {
+          const len = Math.min(chunkSec, dur - off);
+          const partPath = path.join(dir, `p_${idx}.webp`);
+          await new Promise((resolve, reject) => {
+            execFile(
+              ffmpegPath,
+              [
+                '-y',
+                '-loglevel',
+                'error',
+                '-ss',
+                String(startSeconds + off),
+                '-t',
+                String(len),
+                '-i',
+                inPath,
+                '-an',
+                '-vf',
+                filter,
+                '-c:v',
+                'libwebp_anim',
+                '-preset',
+                'default',
+                '-q:v',
+                String(quality),
+                '-loop',
+                '0',
+                '-compression_level',
+                '4',
+                partPath,
+              ],
+              { windowsHide: true, timeout: 60_000 },
+              (err, _stdout, stderr) => {
+                if (err) reject(new Error(`Gagal membuat stiker animasi: ${stderr?.slice(-200) || err.message}`));
+                else resolve();
+              }
+            );
+          });
+          const pBuf = await fs.readFile(partPath);
+          partBufs.push(pBuf);
+          estBytes += pBuf.length;
+          if (estBytes > maxBytes + 4096) {
+            overflow = true;
+            break;
+          }
+        }
+        if (!overflow && partBufs.length > 0) {
+          const stitched = stitchWebpChunks(partBufs, 512, 512);
+          if (stitched.length <= maxBytes) {
+            return { sticker: stitched, isAnimated: true };
+          }
+        }
+      }
+      throw new Error('Ukuran stiker animasi Pinterest melebihi batas 500 KiB.');
+    }
+
+    // GIF animasi -> frame libwebp independen + RIFF muxer (bebas garis-garis, <= 500 KiB)
     const presets = [
       [15, 55],
       [12, 48],

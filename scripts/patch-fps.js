@@ -3,14 +3,15 @@ import path from 'node:path';
 
 const target = path.resolve('node_modules/@xbibzlibrary/whatsbibz/lib/Utils/sound-sticker.js');
 
-const MUX_HELPER = `
-// Pure-Node WebP Animated Muxer (menggabungkan frame libwebp independen agar bebas bug garis-garis / striping libwebp_anim)
-function extractWebpFramePayload(buf) {
-  if (buf.length < 20 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WEBP') {
-    return { payload: Buffer.alloc(0), hasAlpha: false };
-  }
-  const parts = [];
+const STITCH_HELPER = `
+// Pure-Node WebP Chunk Stitcher: menggabungkan potongan libwebp_anim per 1.5 detik
+// (setiap 1.5 detik mendapat keyframe baru yang bersih -> mulus 15-24 FPS, tajam, 0% garis-garis, <= 500 KiB)
+function extractAnmfChunks(buf) {
+  const chunks = [];
   let hasAlpha = false;
+  if (buf.length < 20 || buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WEBP') {
+    return { chunks, hasAlpha };
+  }
   let pos = 12;
   while (pos + 8 <= buf.length) {
     const tag = buf.toString('ascii', pos, pos + 4);
@@ -18,13 +19,11 @@ function extractWebpFramePayload(buf) {
     const padded = size + (size % 2);
     const end = pos + 8 + padded;
     if (end > buf.length) break;
-    if (tag === 'ALPH' || tag === 'VP8 ' || tag === 'VP8L') {
-      if (tag === 'ALPH' || tag === 'VP8L') hasAlpha = true;
-      parts.push(buf.subarray(pos, end));
-    }
+    if (tag === 'VP8X' && (buf[pos + 8] & 0x10)) hasAlpha = true;
+    if (tag === 'ANMF') chunks.push(buf.subarray(pos, end));
     pos = end;
   }
-  return { payload: Buffer.concat(parts), hasAlpha };
+  return { chunks, hasAlpha };
 }
 
 function writeUInt24LE(buf, val, offset) {
@@ -33,33 +32,18 @@ function writeUInt24LE(buf, val, offset) {
   buf[offset + 2] = (val >> 16) & 0xff;
 }
 
-function muxAnimatedWebp(frameBuffers, fps, width = 512, height = 512) {
-  const frameMs = Math.max(20, Math.round(1000 / fps));
-  const anmfChunks = [];
+function stitchWebpChunks(webpBufs, width = 512, height = 512) {
+  const allAnmf = [];
   let hasAlpha = false;
-
-  for (const fb of frameBuffers) {
-    const { payload, hasAlpha: fAlpha } = extractWebpFramePayload(fb);
-    if (!payload.length) continue;
-    if (fAlpha) hasAlpha = true;
-    const chunkSize = 16 + payload.length;
-    const header = Buffer.alloc(24);
-    header.write('ANMF', 0, 4, 'ascii');
-    header.writeUInt32LE(chunkSize, 4);
-    writeUInt24LE(header, 0, 8);
-    writeUInt24LE(header, 0, 11);
-    writeUInt24LE(header, width - 1, 14);
-    writeUInt24LE(header, height - 1, 17);
-    writeUInt24LE(header, frameMs, 20);
-    header[23] = 0x02; // blend=1 (do not blend / replace full canvas), dispose=0
-    anmfChunks.push(header, payload);
-    if (chunkSize % 2 === 1) anmfChunks.push(Buffer.alloc(1));
+  for (const b of webpBufs) {
+    const { chunks, hasAlpha: ha } = extractAnmfChunks(b);
+    if (ha) hasAlpha = true;
+    allAnmf.push(...chunks);
   }
-
   const vp8x = Buffer.alloc(18);
   vp8x.write('VP8X', 0, 4, 'ascii');
   vp8x.writeUInt32LE(10, 4);
-  vp8x[8] = hasAlpha ? 0x12 : 0x02; // ANIM (+ ALPHA)
+  vp8x[8] = hasAlpha ? 0x12 : 0x02;
   writeUInt24LE(vp8x, width - 1, 12);
   writeUInt24LE(vp8x, height - 1, 15);
 
@@ -69,7 +53,7 @@ function muxAnimatedWebp(frameBuffers, fps, width = 512, height = 512) {
   anim.writeUInt32LE(0, 8);
   anim.writeUInt16LE(0, 12);
 
-  const body = Buffer.concat([Buffer.from('WEBP', 'ascii'), vp8x, anim, ...anmfChunks]);
+  const body = Buffer.concat([Buffer.from('WEBP', 'ascii'), vp8x, anim, ...allAnmf]);
   const riff = Buffer.alloc(8);
   riff.write('RIFF', 0, 4, 'ascii');
   riff.writeUInt32LE(body.length, 4);
@@ -77,27 +61,51 @@ function muxAnimatedWebp(frameBuffers, fps, width = 512, height = 512) {
 }
 `;
 
-const CLEAN_LOOP = `    let sticker;
+const SMOOTH_LOOP = `    let sticker;
     const presets = selectedDuration <= 4
-      ? [[24, 65], [20, 58], [15, 52], [12, 45], [10, 38], [8, 30]]
+      ? [[24, 68], [24, 56], [20, 50], [16, 45], [12, 38], [10, 32]]
       : selectedDuration <= 8
-        ? [[15, 55], [12, 48], [10, 42], [8, 36], [6, 28], [5, 22]]
-        : [[10, 45], [8, 42], [8, 34], [6, 32], [6, 24], [5, 20]];
-    const { readdir, mkdir } = await import('node:fs/promises');
-    for (let pi = 0; pi < presets.length; pi++) {
-      const [fps, quality] = presets[pi];
-      const fDir = path.join(dir, \`f_\${pi}\`);
-      await mkdir(fDir, { recursive: true });
+        ? [[20, 55], [18, 48], [15, 45], [12, 40], [10, 35], [8, 28]]
+        : [[16, 50], [15, 45], [12, 40], [10, 35], [8, 30], [6, 24]];
+    const chunkSec = 1.5;
+    for (const [fps, quality] of presets) {
       const filter = \`fps=\${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000\`;
-      await run(ffmpeg, [...common, '-map', '0:v:0', '-an', '-vf', filter, '-c:v', 'libwebp', '-q:v', String(quality),
-        '-compression_level', '4', '-y', path.join(fDir, 'f_%04d.webp')], timeoutMs);
-      const frameFiles = (await readdir(fDir)).filter((f) => f.endsWith('.webp')).sort();
-      if (frameFiles.length >= 2) {
-        const frameBufs = await Promise.all(frameFiles.map((f) => readFile(path.join(fDir, f))));
-        const muxed = muxAnimatedWebp(frameBufs, fps, 512, 512);
-        if (muxed.length <= SOUND_STICKER_MAX_WEBP_BYTES) {
-          sticker = muxed;
+      if (selectedDuration <= chunkSec + 0.2) {
+        await run(ffmpeg, [...common, '-map', '0:v:0', '-an', '-vf', filter, '-c:v', 'libwebp_anim', '-preset', 'default', '-q:v', String(quality),
+          '-loop', '0', '-compression_level', '4', '-y', webpPath], timeoutMs);
+        const size = (await stat(webpPath)).size;
+        if (size <= SOUND_STICKER_MAX_WEBP_BYTES) {
+          sticker = await readFile(webpPath);
           break;
+        }
+      } else {
+        const partBufs = [];
+        let estBytes = 40;
+        let overflow = false;
+        for (let off = 0, idx = 0; off < selectedDuration - 0.04; off += chunkSec, idx++) {
+          const len = Math.min(chunkSec, selectedDuration - off);
+          const partPath = path.join(dir, \`p_\${idx}.webp\`);
+          await run(ffmpeg, [
+            '-nostdin', '-hide_banner', '-loglevel', 'error', '-max_alloc', '67108864', '-threads', '2',
+            '-protocol_whitelist', 'file,pipe', '-f', 'mov', '-enable_drefs', '0',
+            '-ss', String(start + off), '-t', String(len), '-i', input,
+            '-map', '0:v:0', '-an', '-vf', filter, '-c:v', 'libwebp_anim', '-preset', 'default', '-q:v', String(quality),
+            '-loop', '0', '-compression_level', '4', '-y', partPath,
+          ], timeoutMs);
+          const pBuf = await readFile(partPath);
+          partBufs.push(pBuf);
+          estBytes += pBuf.length;
+          if (estBytes > SOUND_STICKER_MAX_WEBP_BYTES + 4096) {
+            overflow = true;
+            break;
+          }
+        }
+        if (!overflow && partBufs.length > 0) {
+          const stitched = stitchWebpChunks(partBufs, 512, 512);
+          if (stitched.length <= SOUND_STICKER_MAX_WEBP_BYTES) {
+            sticker = stitched;
+            break;
+          }
         }
       }
     }`;
@@ -151,19 +159,25 @@ try {
     changed = true;
   }
 
-  // 6. Injeksi pure-Node WebP Animated Muxer jika belum ada
-  if (!src.includes('function muxAnimatedWebp(')) {
+  // 6. Ganti helper lama (muxAnimatedWebp) atau injeksi stitchWebpChunks baru
+  if (src.includes('function muxAnimatedWebp(')) {
+    src = src.replace(
+      /\/\/ Pure-Node WebP Animated Muxer[\s\S]*?(?=export async function convertVideoToSoundSticker\()/,
+      `${STITCH_HELPER}\n`
+    );
+    changed = true;
+  } else if (!src.includes('function stitchWebpChunks(')) {
     src = src.replace(
       'export async function convertVideoToSoundSticker(',
-      `${MUX_HELPER}\nexport async function convertVideoToSoundSticker(`
+      `${STITCH_HELPER}\nexport async function convertVideoToSoundSticker(`
     );
     changed = true;
   }
 
-  // 7. Ganti loop libwebp_anim dengan frame independen libwebp + muxAnimatedWebp (0% garis-garis/striping!)
-  const loopRegex = /    let sticker;\r?\n(?:    const presets[\s\S]*?)?    for \([\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
-  if (loopRegex.test(src) && !src.includes('muxAnimatedWebp(frameBufs')) {
-    src = src.replace(loopRegex, CLEAN_LOOP);
+  // 7. Ganti loop WebP dengan chunked keyframe 1.5s (15-24 FPS mulus, tajam, 0% garis-garis, <= 500 KiB)
+  const loopRegex = /    let sticker;\r?\n[\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
+  if (loopRegex.test(src) && !src.includes('stitchWebpChunks(partBufs')) {
+    src = src.replace(loopRegex, SMOOTH_LOOP);
     changed = true;
   }
 
@@ -178,9 +192,9 @@ try {
 
   if (changed) {
     await fs.writeFile(target, src, 'utf8');
-    console.log('✅ Patched sound-sticker.js (frame independen libwebp + RIFF muxer anti-striping, maks. 15 detik, WebP 500 KiB)');
+    console.log('✅ Patched sound-sticker.js (chunked keyframe 1.5s, mulus 15-24 FPS, anti-striping, maks. 15 detik, WebP 500 KiB)');
   } else {
-    console.log('ℹ️ Patch sound-sticker.js (anti-striping, maks. 15 detik, WebP 500 KiB) sudah aktif');
+    console.log('ℹ️ Patch sound-sticker.js (chunked keyframe 1.5s, mulus 15-24 FPS, WebP 500 KiB) sudah aktif');
   }
 } catch (err) {
   console.warn('⚠️ Lewati patch sound-sticker.js:', err.message);
