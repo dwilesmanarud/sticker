@@ -303,61 +303,150 @@ async function downloadPinterestMedia(rawUrl) {
   const finalUrl = pageRes.url || parsed.toString();
   const pinIdMatch = finalUrl.match(/\/pin\/(\d+)/);
   const pinId = pinIdMatch ? pinIdMatch[1] : null;
-  const html = await pageRes.text();
+  let html = await pageRes.text();
+
+  // Jika pin.it redirect ke halaman /sent/?invite_code=..., ambil halaman kanonis /pin/<id>/ agar metadata lengkap
+  if (pinId && (!html.includes('v3GetPinQueryv2') && !html.includes('leaf-snippet'))) {
+    const canonRes = await fetch(`https://www.pinterest.com/pin/${pinId}/`, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9,id;q=0.8',
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(25_000),
+    });
+    if (canonRes.ok) {
+      html = await canonRes.text();
+    }
+  }
 
   let title = '';
   let mp4Url = null;
   let m3u8Url = null;
   let imageUrl = null;
 
-  // 1. Parse JSON __PWS_INITIAL_PROPS__ jika tersedia
-  const pwsMatch = html.match(/<script[^>]*id="__PWS_INITIAL_PROPS__"[^>]*>([\s\S]*?)<\/script>/i);
-  if (pwsMatch) {
+  // 1. Parse Relay JSON (v3GetPinQueryv2) yang digunakan Pinterest modern
+  for (const m of html.matchAll(/<script[^>]*data-relay-completed-request="true"[^>]*>([\s\S]*?)<\/script>/gi)) {
+    const body = m[1];
+    if (!body.includes('v3GetPinQueryv2')) continue;
+    const jsonStart = body.indexOf('{"data":');
+    const jsonEnd = body.lastIndexOf(')');
+    if (jsonStart === -1 || jsonEnd <= jsonStart) continue;
     try {
-      const props = JSON.parse(pwsMatch[1]);
-      const pinsMap = props?.initialReduxState?.pins || {};
-      const pin =
-        (pinId && pinsMap[pinId]) ||
-        Object.values(pinsMap)[0] ||
-        findPinterestPinObject(props, pinId);
+      const payload = JSON.parse(body.slice(jsonStart, jsonEnd));
+      const pin = payload?.data?.v3GetPinQueryv2?.data;
+      if (!pin || typeof pin !== 'object') continue;
 
-      if (pin) {
-        title = String(pin.title || pin.grid_title || pin.closeup_unified_description || '')
+      if (!title) {
+        title = String(pin.title || pin.gridTitle || pin.description || '')
           .replace(/\s+/g, ' ')
           .trim()
           .slice(0, 45);
+      }
 
-        const directVid = pickPinterestVideoFromList(pin.videos?.video_list);
-        mp4Url = directVid.mp4;
-        m3u8Url = directVid.m3u8;
+      const vList = pin.videos?.videoList || pin.videos?.video_list;
+      if (vList) {
+        const directVid = pickPinterestVideoFromList(vList);
+        if (directVid.mp4 && !mp4Url) mp4Url = directVid.mp4;
+        if (directVid.m3u8 && !m3u8Url) m3u8Url = directVid.m3u8;
+      }
 
-        // Cek juga Idea Pin / Story Pin blocks
-        if (!mp4Url && !m3u8Url && Array.isArray(pin.story_pin_data?.pages)) {
-          for (const page of pin.story_pin_data.pages) {
-            for (const block of page?.blocks || []) {
-              const sv = pickPinterestVideoFromList(block?.video?.video_list);
-              if (sv.mp4) {
-                mp4Url = sv.mp4;
-                break;
-              }
-              if (sv.m3u8 && !m3u8Url) m3u8Url = sv.m3u8;
-            }
-            if (mp4Url) break;
+      const storyPages = pin.storyPinData?.pages || pin.story_pin_data?.pages;
+      if (!mp4Url && !m3u8Url && Array.isArray(storyPages)) {
+        for (const page of storyPages) {
+          for (const block of page?.blocks || []) {
+            const sv = pickPinterestVideoFromList(block?.video?.videoList || block?.video?.video_list);
+            if (sv.mp4 && !mp4Url) mp4Url = sv.mp4;
+            if (sv.m3u8 && !m3u8Url) m3u8Url = sv.m3u8;
           }
         }
+      }
 
+      if (!imageUrl) {
         imageUrl =
+          pin.imageSpec_orig?.url ||
           pin.images?.orig?.url ||
+          pin.imageSpec_736x?.url ||
           pin.images?.['736x']?.url ||
-          pin.images?.['564x']?.url ||
+          pin.images_orig?.url ||
+          pin.images_736x?.url ||
           null;
       }
     } catch {
-      // Lanjut ke fallback regex HTML
+      // Lanjut ke blok berikutnya
     }
   }
 
-  // 2. Fallback regex langsung dari HTML halaman Pinterest
+  // 2. Parse JSON-LD (leaf-snippet) jika masih belum lengkap
+  for (const m of html.matchAll(/<script[^>]*type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)) {
+    try {
+      const ld = JSON.parse(m[1]);
+      if (!title && (ld.headline || ld.name)) {
+        title = String(ld.headline || ld.name).replace(/\s+/g, ' ').trim().slice(0, 45);
+      }
+      if (!mp4Url && typeof ld.contentUrl === 'string' && /\.mp4(\?|$)/i.test(ld.contentUrl)) {
+        mp4Url = ld.contentUrl;
+      }
+      if (!imageUrl && typeof ld.image === 'string' && ld.image.includes('pinimg.com')) {
+        imageUrl = ld.image;
+      }
+    } catch {
+      // Abaikan
+    }
+  }
+
+  // 3. Fallback JSON __PWS_INITIAL_PROPS__
+  if (!mp4Url && !m3u8Url && !imageUrl) {
+    const pwsMatch = html.match(/<script[^>]*id="__PWS_INITIAL_PROPS__"[^>]*>([\s\S]*?)<\/script>/i);
+    if (pwsMatch) {
+      try {
+        const props = JSON.parse(pwsMatch[1]);
+        const pinsMap = props?.initialReduxState?.pins || {};
+        const pin =
+          (pinId && pinsMap[pinId]) ||
+          Object.values(pinsMap)[0] ||
+          findPinterestPinObject(props, pinId);
+
+        if (pin) {
+          if (!title) {
+            title = String(pin.title || pin.grid_title || pin.closeup_unified_description || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 45);
+          }
+
+          const directVid = pickPinterestVideoFromList(pin.videos?.video_list);
+          mp4Url = directVid.mp4;
+          m3u8Url = directVid.m3u8;
+
+          if (!mp4Url && !m3u8Url && Array.isArray(pin.story_pin_data?.pages)) {
+            for (const page of pin.story_pin_data.pages) {
+              for (const block of page?.blocks || []) {
+                const sv = pickPinterestVideoFromList(block?.video?.video_list);
+                if (sv.mp4) {
+                  mp4Url = sv.mp4;
+                  break;
+                }
+                if (sv.m3u8 && !m3u8Url) m3u8Url = sv.m3u8;
+              }
+              if (mp4Url) break;
+            }
+          }
+
+          imageUrl =
+            pin.images?.orig?.url ||
+            pin.images?.['736x']?.url ||
+            pin.images?.['564x']?.url ||
+            null;
+        }
+      } catch {
+        // Lanjut ke fallback regex HTML
+      }
+    }
+  }
+
+  // 4. Fallback regex langsung dari HTML halaman Pinterest (kecualikan aset UI bawaan Pinterest)
   if (!mp4Url) {
     const m = html.match(/https:\/\/v\d*\.pinimg\.com\/[^"'\s\\]+?\.mp4(?:\?[^"'\s\\]*)?/i);
     if (m) mp4Url = m[0].replace(/\\u002F/g, '/');
@@ -367,13 +456,13 @@ async function downloadPinterestMedia(rawUrl) {
     if (m) m3u8Url = m[0].replace(/\\u002F/g, '/');
   }
   if (!imageUrl) {
-    const origMatch = html.match(
-      /https:\/\/i\.pinimg\.com\/originals\/[^"'\s\\]+?\.(?:gif|png|jpg|jpeg|webp)/i
-    );
-    const largeMatch = html.match(
-      /https:\/\/i\.pinimg\.com\/736x\/[^"'\s\\]+?\.(?:gif|png|jpg|jpeg|webp)/i
-    );
-    imageUrl = origMatch?.[0] || largeMatch?.[0] || null;
+    const allOrigs =
+      html.match(/https:\/\/i\.pinimg\.com\/originals\/[^"'\s\\]+?\.(?:gif|png|jpg|jpeg|webp)/gi) || [];
+    const realOrig = allOrigs.find((u) => !u.includes('d53b014d86a6b6761bf649a0ed813c2b'));
+    const allLarge =
+      html.match(/https:\/\/i\.pinimg\.com\/736x\/[^"'\s\\]+?\.(?:gif|png|jpg|jpeg|webp)/gi) || [];
+    const realLarge = allLarge.find((u) => !u.includes('d53b014d86a6b6761bf649a0ed813c2b'));
+    imageUrl = realOrig || realLarge || null;
   }
 
   const cleanTitle = title || `Pinterest ${pinId || ''}`.trim();
