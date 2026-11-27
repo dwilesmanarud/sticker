@@ -1097,16 +1097,15 @@ async function convertMediaToWebpSticker(
       } catch {
         // Pakai fallback durasi 5 detik
       }
-      const chunkSec = 1.5;
+      const chunkSec = dur > 8 ? 2.5 : 1.5;
       const presets = [
-        [18, 50],
-        [15, 45],
-        [12, 40],
-        [10, 35],
-        [8, 30],
-        [6, 24],
-        [6, 15],
-        [5, 10],
+        [18, 46],
+        [15, 42],
+        [12, 36],
+        [10, 32],
+        [8, 26],
+        [6, 20],
+        [5, 14],
         [4, 8],
       ];
       for (const [fps, quality] of presets) {

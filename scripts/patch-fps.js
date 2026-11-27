@@ -66,8 +66,8 @@ const SMOOTH_LOOP = `    let sticker;
       ? [[24, 68], [24, 56], [20, 50], [16, 45], [12, 38], [10, 32], [8, 22], [6, 15]]
       : selectedDuration <= 8
         ? [[20, 55], [18, 48], [15, 45], [12, 40], [10, 35], [8, 28], [6, 18], [5, 12]]
-        : [[16, 50], [15, 45], [12, 40], [10, 35], [8, 30], [6, 24], [6, 15], [5, 10], [4, 8]];
-    const chunkSec = 1.5;
+        : [[18, 46], [15, 42], [12, 36], [10, 32], [8, 26], [6, 20], [5, 14], [4, 8]];
+    const chunkSec = selectedDuration > 8 ? 2.5 : 1.5;
     const gsHex = typeof options.greenScreenColor === 'string' && /^0x[0-9a-fA-F]{6}$/.test(options.greenScreenColor)
       ? options.greenScreenColor
       : (options.removeGreenScreen ? '0x00FF00' : null);
@@ -178,9 +178,9 @@ try {
     changed = true;
   }
 
-  // 7. Ganti loop WebP dengan chunked keyframe 1.5s + dukungan hapus green screen + fallback ringan [4, 8]
+  // 7. Ganti loop WebP dengan chunked keyframe adaptif (1.5s / 2.5s untuk > 8 dtk) + green screen + fallback [4, 8]
   const loopRegex = /    let sticker;\r?\n[\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
-  if (loopRegex.test(src) && !src.includes('[4, 8]')) {
+  if (loopRegex.test(src) && !src.includes('selectedDuration > 8 ? 2.5 : 1.5')) {
     src = src.replace(loopRegex, SMOOTH_LOOP);
     changed = true;
   }
