@@ -63,10 +63,10 @@ function stitchWebpChunks(webpBufs, width = 512, height = 512) {
 
 const SMOOTH_LOOP = `    let sticker;
     const presets = selectedDuration <= 4
-      ? [[24, 68], [24, 56], [20, 50], [16, 45], [12, 38], [10, 32]]
+      ? [[24, 68], [24, 56], [20, 50], [16, 45], [12, 38], [10, 32], [8, 22], [6, 15]]
       : selectedDuration <= 8
-        ? [[20, 55], [18, 48], [15, 45], [12, 40], [10, 35], [8, 28]]
-        : [[16, 50], [15, 45], [12, 40], [10, 35], [8, 30], [6, 24]];
+        ? [[20, 55], [18, 48], [15, 45], [12, 40], [10, 35], [8, 28], [6, 18], [5, 12]]
+        : [[16, 50], [15, 45], [12, 40], [10, 35], [8, 30], [6, 24], [6, 15], [5, 10], [4, 8]];
     const chunkSec = 1.5;
     const gsHex = typeof options.greenScreenColor === 'string' && /^0x[0-9a-fA-F]{6}$/.test(options.greenScreenColor)
       ? options.greenScreenColor
@@ -178,9 +178,9 @@ try {
     changed = true;
   }
 
-  // 7. Ganti loop WebP dengan chunked keyframe 1.5s + dukungan hapus green screen (chromakey + despill)
+  // 7. Ganti loop WebP dengan chunked keyframe 1.5s + dukungan hapus green screen + fallback ringan [4, 8]
   const loopRegex = /    let sticker;\r?\n[\s\S]*?\r?\n    \}(?=\r?\n    if \(!sticker\))/;
-  if (loopRegex.test(src) && !src.includes('despill=type=green')) {
+  if (loopRegex.test(src) && !src.includes('[4, 8]')) {
     src = src.replace(loopRegex, SMOOTH_LOOP);
     changed = true;
   }

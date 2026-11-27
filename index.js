@@ -1105,6 +1105,9 @@ async function convertMediaToWebpSticker(
         [10, 35],
         [8, 30],
         [6, 24],
+        [6, 15],
+        [5, 10],
+        [4, 8],
       ];
       for (const [fps, quality] of presets) {
         const filter = `fps=${fps},scale=512:512:force_original_aspect_ratio=decrease:flags=lanczos,${gsFilter}format=rgba,pad=512:512:(ow-iw)/2:(oh-ih)/2:color=0x00000000`;
