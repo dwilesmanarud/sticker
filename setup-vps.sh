@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
+SUDO=""
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+  SUDO="sudo"
+fi
+
 echo "========================================================"
 echo "  Setup WhatsApp Sound Sticker Bot di InstaBox Linux"
 echo "  Developer: Rudi Dwi Lesmana"
@@ -9,8 +14,8 @@ echo "========================================================"
 # 1. Install ffmpeg & curl jika belum ada
 if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "[1/4] Memasang ffmpeg..."
-  sudo apt-get update -y
-  sudo apt-get install -y ffmpeg curl ca-certificates
+  $SUDO apt-get update -y
+  $SUDO apt-get install -y ffmpeg curl ca-certificates
 else
   echo "[1/4] ffmpeg sudah terpasang: $(ffmpeg -version | head -n 1)"
 fi
@@ -28,8 +33,12 @@ fi
 
 if [ "$NEED_NODE" -eq 1 ]; then
   echo "[2/4] Memasang Node.js 20..."
-  curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-  sudo apt-get install -y nodejs
+  if [ -n "$SUDO" ]; then
+    curl -fsSL https://deb.nodesource.com/setup_20.x | $SUDO -E bash -
+  else
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  fi
+  $SUDO apt-get install -y nodejs
 else
   echo "[2/4] Node.js sudah siap: $(node -v)"
 fi
@@ -37,7 +46,7 @@ fi
 # 3. Install PM2 & dependensi proyek + patch 24 FPS / 15 detik / 1000 KiB
 if ! command -v pm2 >/dev/null 2>&1; then
   echo "[3/4] Memasang PM2..."
-  sudo npm install -g pm2
+  $SUDO npm install -g pm2
 fi
 
 echo "[3/4] Memasang dependensi npm & menerapkan patch..."
